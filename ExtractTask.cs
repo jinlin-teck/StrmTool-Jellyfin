@@ -1,9 +1,11 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Entities;
@@ -24,10 +26,12 @@ namespace StrmTool
         protected readonly SemaphoreSlim _semaphore;
 
         private readonly ILibraryManager _libraryManager;
-        private readonly IMediaStreamRepository _mediaStreamRepository;
         private LibraryScanListener _scanListener;
         private ItemUpdateListener _updateListener;
         private readonly CancellationTokenSource _backgroundTaskCts = new CancellationTokenSource();
+        private readonly Channel<Guid> _autoExtractQueue = Channel.CreateUnbounded<Guid>();
+        private readonly ConcurrentDictionary<Guid, byte> _queuedAutoExtractItems = new ConcurrentDictionary<Guid, byte>();
+        private readonly Task[] _autoExtractWorkers;
         private readonly object _eventLock = new object();
 
         public ExtractTask(
@@ -54,8 +58,6 @@ namespace StrmTool
             _semaphore = new SemaphoreSlim(_config.MaxConcurrentExtract);
 
             _libraryManager = libraryManager;
-            _mediaStreamRepository = mediaStreamRepository;
-
             try
             {
                 _scanListener = new LibraryScanListener(_libraryManager, _logger, _config, _mediaCache);
@@ -74,6 +76,10 @@ namespace StrmTool
             {
                 _logger.LogError(ex, "Failed to initialize item update listener");
             }
+
+            _autoExtractWorkers = Enumerable.Range(0, _config.MaxConcurrentExtract)
+                .Select(_ => Task.Run(ProcessAutoExtractQueueAsync))
+                .ToArray();
         }
 
         public string Category => "StrmTool";
@@ -101,41 +107,59 @@ namespace StrmTool
         /// </summary>
         protected async Task<int> ProcessStrmItemsAsync(
             List<BaseItem> items,
-            Func<BaseItem, CancellationToken, Task> processItemAsync,
+            Func<BaseItem, CancellationToken, Task<bool>> processItemAsync,
             IProgress<double> progress,
             CancellationToken cancellationToken)
         {
             int processed = 0;
+            int succeeded = 0;
             int total = items.Count;
 
-            var tasks = items.Select(async item =>
+            int nextIndex = -1;
+            async Task WorkerAsync()
             {
-                await _semaphore.WaitAsync(cancellationToken);
-                try
+                while (true)
                 {
-                    if (cancellationToken.IsCancellationRequested)
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int index = Interlocked.Increment(ref nextIndex);
+                    if (index >= total)
                     {
                         return;
                     }
 
-                    await processItemAsync(item, cancellationToken).ConfigureAwait(false);
+                    var item = items[index];
+                    await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        bool hasMediaInfo = await processItemAsync(item, cancellationToken).ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (hasMediaInfo)
+                        {
+                            Interlocked.Increment(ref succeeded);
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error processing {Name} ({Path})", item.Name, item.Path);
+                    }
+                    finally
+                    {
+                        _semaphore.Release();
+                        int current = Interlocked.Increment(ref processed);
+                        progress.Report(Math.Min((double)current / total * 100, 100));
+                    }
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error processing {Name} ({Path})", item.Name, item.Path);
-                }
-                finally
-                {
-                    _semaphore.Release();
-                    int current = Interlocked.Increment(ref processed);
-                    double percent = Math.Min((double)current / total * 100, 100);
-                    progress.Report(percent);
-                }
-            });
+            }
 
-            await Task.WhenAll(tasks);
+            var tasks = Enumerable.Range(0, Math.Min(total, _config.MaxConcurrentExtract))
+                .Select(_ => Task.Run(WorkerAsync, cancellationToken));
+            await Task.WhenAll(tasks).ConfigureAwait(false);
             progress.Report(100);
-            return processed;
+            return succeeded;
         }
 
         /// <summary>
@@ -170,6 +194,14 @@ namespace StrmTool
             }
         }
 
+        private bool HasInvalidCache(BaseItem item)
+        {
+            return _config.EnableMediaInfoCache &&
+                   !_config.ForceRefreshIgnoreCache &&
+                   _mediaCache.HasCacheFile(item.Path) &&
+                   !_mediaCache.TryGetCachedMediaStreams(item.Path, out _);
+        }
+
         /// <summary>
         /// 探测媒体流并保存到缓存
         /// </summary>
@@ -188,7 +220,8 @@ namespace StrmTool
                     probeResult.Size,
                     probeResult.RunTimeTicks,
                     probeResult.Container,
-                    cancellationToken).ConfigureAwait(false);
+                    expectedStrmContentHash: probeResult.StrmContentHash,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
             return probeResult;
@@ -209,29 +242,62 @@ namespace StrmTool
                 return;
             }
 
-            _ = Task.Run(async () =>
+            if (!_queuedAutoExtractItems.TryAdd(item.Id, 0))
             {
-                try
-                {
-                    var timeoutMinutes = _config?.MetadataRestoreTimeoutMinutes ?? 5;
-                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(_backgroundTaskCts.Token);
-                    cts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes));
-                    await Task.Delay(_config.RefreshDelayMs, cts.Token).ConfigureAwait(false);
+                return;
+            }
 
-                    if (_disposed)
-                        return;
+            if (!_autoExtractQueue.Writer.TryWrite(item.Id))
+            {
+                _queuedAutoExtractItems.TryRemove(item.Id, out _);
+            }
+        }
 
-                    await ExtractSingleItemAsync(item, cts.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
+        private async Task ProcessAutoExtractQueueAsync()
+        {
+            try
+            {
+                await foreach (var itemId in _autoExtractQueue.Reader.ReadAllAsync(_backgroundTaskCts.Token))
                 {
-                    _logger.LogDebug("Extraction cancelled for {Name}", fileName);
+                    try
+                    {
+                        RefreshConfig();
+                        if (!_config.EnableAutoExtract)
+                            continue;
+
+                        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_backgroundTaskCts.Token);
+                        cts.CancelAfter(TimeSpan.FromMinutes(_config.MetadataRestoreTimeoutMinutes));
+                        await Task.Delay(_config.RefreshDelayMs, cts.Token).ConfigureAwait(false);
+
+                        if (!_disposed)
+                        {
+                            var item = _libraryManager.GetItemById(itemId);
+                            if (item == null)
+                            {
+                                _logger.LogWarning("Auto-extract item {ItemId} no longer exists", itemId);
+                                continue;
+                            }
+
+                            await ExtractSingleItemAsync(item, cts.Token).ConfigureAwait(false);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _logger.LogDebug("Extraction cancelled for item {ItemId}", itemId);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error in auto-extract background task for item {ItemId}", itemId);
+                    }
+                    finally
+                    {
+                        _queuedAutoExtractItems.TryRemove(itemId, out _);
+                    }
                 }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error in auto-extract background task for {Name}", fileName);
-                }
-            }, _backgroundTaskCts.Token);
+            }
+            catch (OperationCanceledException) when (_backgroundTaskCts.IsCancellationRequested)
+            {
+            }
         }
 
         public void CleanupListener()
@@ -277,7 +343,7 @@ namespace StrmTool
                         bool hasVideo = mediaStreams.Any(s => s.Type == MediaStreamType.Video);
                         bool hasAudio = mediaStreams.Any(s => s.Type == MediaStreamType.Audio);
 
-                        if (_config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio))
+                        if (_config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio) || HasInvalidCache(item))
                         {
                             strmItems.Add(item);
                         }
@@ -301,6 +367,11 @@ namespace StrmTool
 
                 await ProcessStrmFiles(strmItems, progress, cancellationToken);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogInformation("STRM file scan cancelled");
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Fatal error during strm file scan");
@@ -310,16 +381,16 @@ namespace StrmTool
 
         private async Task ProcessStrmFiles(List<BaseItem> strmItems, IProgress<double> progress, CancellationToken cancellationToken)
         {
-            int processed = await ProcessStrmItemsAsync(strmItems, ProcessSingleItemAsync, progress, cancellationToken);
+            int succeeded = await ProcessStrmItemsAsync(strmItems, ProcessSingleItemAsync, progress, cancellationToken);
 
-            _logger.LogInformation("Task complete. Successfully processed {Processed}/{Total} strm files.",
-                processed, strmItems.Count);
+            _logger.LogInformation("Task complete. {Succeeded}/{Total} strm files now have media info.",
+                succeeded, strmItems.Count);
         }
 
         /// <summary>
         /// 核心处理逻辑：从缓存加载或探测媒体流
         /// </summary>
-        private async Task<(List<MediaStream> before, List<MediaStream> after)> ProcessItemCoreAsync(
+        private async Task<(List<MediaStream> before, List<MediaStream> after, bool probed)> ProcessItemCoreAsync(
             BaseItem item, 
             string logPrefix,
             CancellationToken cancellationToken)
@@ -336,18 +407,26 @@ namespace StrmTool
                 await ProbeAndCacheAsync(item, cancellationToken).ConfigureAwait(false);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var afterStreams = _mediaInfoService.GetItemMediaStreams(item);
-            return (beforeStreams, afterStreams);
+            return (beforeStreams, afterStreams, !loadedFromCache);
         }
 
-        private async Task ProcessSingleItemAsync(BaseItem item, CancellationToken cancellationToken)
+        private async Task<bool> ProcessSingleItemAsync(BaseItem item, CancellationToken cancellationToken)
         {
             _logger.LogDebug("Processing {Name}", item.Name);
 
-            var (beforeStreams, afterStreams) = await ProcessItemCoreAsync(
+            var (beforeStreams, afterStreams, probed) = await ProcessItemCoreAsync(
                 item, 
                 "StrmTool", 
                 cancellationToken).ConfigureAwait(false);
+
+            // 仅在实际发起远程探测后按 RefreshDelayMs 限速（缓存命中不延迟），
+            // 避免并发 worker 对远程媒体服务器造成瞬时探测风暴
+            if (probed && _config.RefreshDelayMs > 0)
+            {
+                await Task.Delay(_config.RefreshDelayMs, cancellationToken).ConfigureAwait(false);
+            }
 
             bool hasVideo = afterStreams.Any(s => s.Type == MediaStreamType.Video);
             bool hasAudio = afterStreams.Any(s => s.Type == MediaStreamType.Audio);
@@ -365,6 +444,8 @@ namespace StrmTool
             {
                 _logger.LogWarning("{Name} may still lack media stream info", item.Name);
             }
+
+            return hasVideo || hasAudio;
         }
 
         public async Task ExtractSingleItemAsync(BaseItem item, CancellationToken cancellationToken)
@@ -383,14 +464,14 @@ namespace StrmTool
                 bool hasVideo = beforeStreams.Any(s => s.Type == MediaStreamType.Video);
                 bool hasAudio = beforeStreams.Any(s => s.Type == MediaStreamType.Audio);
 
-                if (!_config.ForceRefreshIgnoreExisting && (hasVideo || hasAudio))
+                if (!_config.ForceRefreshIgnoreExisting && (hasVideo || hasAudio) && !HasInvalidCache(item))
                 {
                     _logger.LogInformation("{Name} already has media stream info, skipping", fileName);
                     return;
                 }
 
                 // 使用提取的通用方法处理缓存和探测
-                var (_, afterStreams) = await ProcessItemCoreAsync(
+                var (_, afterStreams, _) = await ProcessItemCoreAsync(
                     item, 
                     "Auto-extract", 
                     cancellationToken).ConfigureAwait(false);
@@ -401,6 +482,10 @@ namespace StrmTool
                     beforeStreams.Count,
                     afterStreams.Count
                 );
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -435,9 +520,45 @@ namespace StrmTool
                 {
                 }
 
-                CleanupListener();
-                _backgroundTaskCts.Dispose();
-                _semaphore.Dispose();
+                _autoExtractQueue.Writer.TryComplete();
+
+                // 监听器清理（内部最长等待 30s）与队列 worker 退出并行等待，避免串行阻塞
+                var listenerCleanup = Task.Run(CleanupListener);
+
+                while (_autoExtractQueue.Reader.TryRead(out _))
+                {
+                }
+                _queuedAutoExtractItems.Clear();
+
+                // Wait for queue workers before releasing the cancellation source. The semaphore
+                // is managed-only here and may still be in use by a scheduled task during unload.
+                var workers = Task.WhenAll(_autoExtractWorkers);
+                try
+                {
+                    if (workers.Wait(TimeSpan.FromSeconds(30)))
+                    {
+                        _backgroundTaskCts.Dispose();
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Timeout waiting for auto-extract workers to stop");
+                        _ = workers.ContinueWith(_ => _backgroundTaskCts.Dispose(), TaskScheduler.Default);
+                    }
+                }
+                catch (AggregateException ex)
+                {
+                    _logger.LogWarning(ex, "Auto-extract worker stopped with an error");
+                    _backgroundTaskCts.Dispose();
+                }
+
+                try
+                {
+                    listenerCleanup.Wait();
+                }
+                catch (AggregateException ex)
+                {
+                    _logger.LogWarning(ex, "Error cleaning up listeners");
+                }
             }
         }
     }

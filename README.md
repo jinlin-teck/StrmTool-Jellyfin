@@ -8,11 +8,11 @@ Jellyfin 插件，用于从 strm 文件中提取媒体技术信息（codec、分
 
 1. **媒体信息提前提取**：在 strm 文件入库后立即向远程服务器请求并获取媒体技术信息（音视频编码、分辨率、字幕等）
 2. **自动提取新文件**：新入库的 strm 文件可开启功能后自动在后台提取媒体信息，无需手动介入
-3. **媒体信息缓存**：自动缓存提取的媒体信息为同名 `.strmtool.json` 文件（保存在 strm 文件同目录下），下次提取时可直接导入
+3. **媒体信息缓存**：自动缓存提取的媒体信息为同名 `.strmtool.json` 文件（保存在 strm 文件同目录下），下次提取时可直接导入；缓存与 strm 内容指纹绑定，strm 内容变化后自动失效并重新探测
 4. **计划任务支持**：提供 `Extract Strm Media Info`计划任务，支持手动触发和定时执行
 5. **配置界面**：提供插件设置页面，可调整自动提取开关、刷新延迟时间、持久化缓存开关和最大并发数以及强制刷新策略
 
-适配 Jellyfin 10.11.0+（最新的 10.11.6 已测试通过，其他版本请自行测试）
+适配 Jellyfin 10.11.0+（最新的 12.1.0 已测试通过，其他版本请自行测试）
 
 ## 安装方法
 
@@ -48,6 +48,7 @@ Jellyfin 插件，用于从 strm 文件中提取媒体技术信息（codec、分
 - 请根据使用的 Jellyfin 版本选择对应版本的插件
 - v1.0.0.3 相比之前版本不会调用任何第三方元数据服务，已有的元数据（标题、描述、海报等）不会被修改
 - 媒体信息缓存文件格式为 `strm_filename.strmtool.json`，位于 strm 文件同目录
+- 缓存通过 STRM 内容指纹校验有效性：strm 指向的媒体源变化后旧缓存自动失效，不会复用过期媒体信息
 
 ---
 
@@ -63,11 +64,11 @@ Jellyfin plugin for extracting media technical information (codec, resolution, s
 
 1. **Early Media Information Extraction**: Immediately requests and obtains media technical information (audio/video codec, resolution, subtitles, etc.) from remote servers after strm files are added to the library
 2. **Automatic Extraction for New Files**: Newly added strm files can automatically extract media information in the background when the feature is enabled, no manual intervention required
-3. **Media Information Caching**: Automatically caches extracted media information as `.strmtool.json` files with the same name (saved in the same directory as the strm file), allowing direct import during next extraction
+3. **Media Information Caching**: Automatically caches extracted media information as `.strmtool.json` files with the same name (saved in the same directory as the strm file), allowing direct import during next extraction; the cache is bound to the strm content fingerprint and automatically invalidated and re-probed when the strm content changes
 4. **Scheduled Task Support**: Provides an `Extract Strm Media Info` scheduled task that supports manual triggering and scheduled execution
 5. **Configuration Interface**: Provides a plugin settings page to adjust automatic extraction toggle, refresh delay, persistent cache toggle, maximum concurrency, and force refresh strategies
 
-Compatible with Jellyfin 10.11.0+ (latest 10.11.6 tested, other versions please test yourself)
+Compatible with Jellyfin 10.11.0+ (latest 12.1.0 tested, other versions please test yourself)
 
 ## Installation
 
@@ -103,3 +104,4 @@ Click the "Settings" button on the plugin details page to adjust the following c
 - Please select the corresponding plugin version based on your Jellyfin version
 - Compared to previous versions, v1.0.0.3 does not call any third-party metadata services, and existing metadata (title, description, posters, etc.) will not be modified
 - Media info cache file format is `strm_filename.strmtool.json`, located in the same directory as the strm file
+- Cache validity is verified via the STRM content fingerprint: when the media source pointed to by a strm file changes, the old cache is automatically invalidated instead of reusing stale media info

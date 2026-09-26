@@ -1,252 +1,1151 @@
-<div id="configPage" data-role="page" class="page pattern">
-    <div style="margin-top: 60px; margin-left: 20px;">
-        <h3 id="pageTitle">Strm Tool Settings</h3>
-        <div class="verticalSection">
-            <div class="checkboxContainer">
-                <label>
-                    <input type="checkbox" id="chkEnableAutoExtract" />
-                    <span id="lblEnableAutoExtract">Automatically extract media info for new strm files</span>
-                </label>
-                <div class="fieldDescription" id="descEnableAutoExtract">When enabled, new strm files will automatically extract media info in the background without manual task execution</div>
-            </div>
-        </div>
-        <div class="verticalSection">
-            <div class="checkboxContainer">
-                <label>
-                    <input type="checkbox" id="chkEnableMediaInfoCache" />
-                    <span id="lblEnableMediaInfoCache">Enable media info caching</span>
-                </label>
-                <div class="fieldDescription" id="descEnableMediaInfoCache">When enabled, extracted media info will be saved to xxx.strmtool.json files to avoid repeated probing</div>
-            </div>
-        </div>
+<div id="configPage" data-role="page" class="page type-interior pluginConfigurationPage strmtool-page" data-require="emby-input,emby-button,emby-checkbox">
+    <style>
+        /* ============================================================
+           StrmTool 现代化控制台样式表
+           ============================================================ */
+        .strmtool-page {
+            color: #d1d7e0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: transparent;
+        }
 
-        <div class="verticalSection">
-            <div class="inputContainer">
-                <label for="txtRefreshDelay" id="lblRefreshDelay">Refresh delay (ms)</label>
-                <input type="number" id="txtRefreshDelay" min="0" step="100" />
-                <div class="fieldDescription" id="descRefreshDelay">Milliseconds to wait after each media info refresh to avoid overwhelming remote servers</div>
+        .strmtool-container {
+            max-width: 880px;
+            margin: 0 auto;
+            padding: 28px 24px 80px;
+            box-sizing: border-box;
+        }
+
+        /* 头部 Hero 区域 */
+        .strmtool-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 28px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            flex-wrap: wrap;
+        }
+
+        .strmtool-header-main {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .strmtool-logo-badge {
+            width: 52px;
+            height: 52px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 4px 18px rgba(0, 164, 220, 0.4);
+            flex-shrink: 0;
+            overflow: hidden;
+            background: transparent;
+        }
+
+        .strmtool-logo-badge img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+
+        .strmtool-header-title-wrap {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .strmtool-title-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .strmtool-header-title {
+            margin: 0;
+            font-size: 1.55rem;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            color: #ffffff;
+        }
+
+        .strmtool-version-pill {
+            font-size: 0.72rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            padding: 3px 8px;
+            border-radius: 20px;
+            background: rgba(0, 164, 220, 0.16);
+            color: #38bdf8;
+            border: 1px solid rgba(56, 189, 248, 0.28);
+        }
+
+        .strmtool-header-desc {
+            margin: 0;
+            font-size: 0.88rem;
+            color: #94a3b8;
+            line-height: 1.45;
+        }
+
+        /* 卡片通用样式 */
+        .strmtool-card {
+            background: rgba(255, 255, 255, 0.035);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            padding: 22px 24px;
+            margin-bottom: 22px;
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+            transition: border-color 0.25s ease, box-shadow 0.25s ease;
+        }
+
+        .strmtool-card:hover {
+            border-color: rgba(255, 255, 255, 0.14);
+        }
+
+        .strmtool-card-warning {
+            background: linear-gradient(180deg, rgba(245, 158, 11, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
+            border: 1px solid rgba(245, 158, 11, 0.22);
+        }
+
+        .strmtool-card-warning:hover {
+            border-color: rgba(245, 158, 11, 0.35);
+        }
+
+        .strmtool-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 18px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+
+        .strmtool-card-title-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .strmtool-card-icon {
+            width: 22px;
+            height: 22px;
+            color: #38bdf8;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .strmtool-card-icon.warning {
+            color: #fbbf24;
+        }
+
+        .strmtool-card-title {
+            margin: 0;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+
+        .strmtool-badge {
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 2px 7px;
+            border-radius: 6px;
+        }
+
+        .strmtool-badge-warning {
+            background: rgba(245, 158, 11, 0.18);
+            color: #fcd34d;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
+        .strmtool-badge-info {
+            background: rgba(0, 164, 220, 0.16);
+            color: #38bdf8;
+            border: 1px solid rgba(56, 189, 248, 0.26);
+        }
+
+        /* 警示条 Banner */
+        .strmtool-banner-warning {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 12px 14px;
+            border-radius: 10px;
+            background: rgba(245, 158, 11, 0.1);
+            border: 1px solid rgba(245, 158, 11, 0.2);
+            color: #fde68a;
+            font-size: 0.84rem;
+            line-height: 1.45;
+            margin-bottom: 18px;
+        }
+
+        .strmtool-banner-warning svg {
+            width: 18px;
+            height: 18px;
+            fill: #fbbf24;
+            flex-shrink: 0;
+            margin-top: 1px;
+        }
+
+        /* 开关行 (Toggle Row) */
+        .strmtool-setting-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            padding: 14px 16px;
+            margin: 0 -8px 8px;
+            border-radius: 12px;
+            transition: background 0.18s ease;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .strmtool-setting-row:hover {
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .strmtool-setting-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .strmtool-setting-label {
+            display: block;
+            font-size: 0.96rem;
+            font-weight: 550;
+            color: #f8fafc;
+            margin-bottom: 3px;
+        }
+
+        .strmtool-setting-desc {
+            display: block;
+            font-size: 0.83rem;
+            color: #94a3b8;
+            line-height: 1.45;
+        }
+
+        /* 现代 iOS / Fluent 风格 Switch 开关 */
+        .strmtool-switch {
+            position: relative;
+            display: inline-block;
+            width: 48px;
+            height: 26px;
+            flex-shrink: 0;
+            cursor: pointer;
+        }
+
+        .strmtool-switch input {
+            position: absolute;
+            opacity: 0;
+            width: 0;
+            height: 0;
+            margin: 0;
+            padding: 0;
+        }
+
+        .strmtool-switch-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.16);
+            border-radius: 26px;
+            transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .strmtool-switch-slider:before {
+            position: absolute;
+            content: "";
+            height: 20px;
+            width: 20px;
+            left: 2px;
+            bottom: 2px;
+            background-color: #ffffff;
+            border-radius: 50%;
+            transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .strmtool-switch input:checked + .strmtool-switch-slider {
+            background: linear-gradient(135deg, #00a4dc 0%, #0284c7 100%);
+            border-color: rgba(56, 189, 248, 0.4);
+            box-shadow: 0 0 10px rgba(0, 164, 220, 0.35);
+        }
+
+        .strmtool-switch input:focus-visible + .strmtool-switch-slider {
+            outline: 2px solid #38bdf8;
+            outline-offset: 2px;
+        }
+
+        .strmtool-switch input:checked + .strmtool-switch-slider:before {
+            transform: translateX(22px);
+            background-color: #ffffff;
+        }
+
+        /* 警告项的选中状态样式 */
+        .strmtool-switch.warning input:checked + .strmtool-switch-slider {
+            background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+            border-color: rgba(251, 191, 36, 0.4);
+            box-shadow: 0 0 10px rgba(245, 158, 11, 0.35);
+        }
+
+        /* 输入项网格与表单控件 */
+        .strmtool-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 20px;
+            margin-top: 6px;
+        }
+
+        .strmtool-field-card {
+            background: rgba(0, 0, 0, 0.22);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 12px;
+            padding: 16px 18px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            transition: border-color 0.2s ease, background 0.2s ease;
+        }
+
+        .strmtool-field-card:focus-within {
+            border-color: rgba(0, 164, 220, 0.5);
+            background: rgba(0, 0, 0, 0.32);
+        }
+
+        .strmtool-field-card.full-width {
+            grid-column: 1 / -1;
+        }
+
+        .strmtool-field-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 6px;
+        }
+
+        .strmtool-field-label {
+            font-size: 0.92rem;
+            font-weight: 600;
+            color: #f1f5f9;
+        }
+
+        .strmtool-input-wrap {
+            position: relative;
+            display: flex;
+            align-items: center;
+            margin: 10px 0 8px;
+        }
+
+        .strmtool-input-number {
+            width: 100%;
+            height: 42px;
+            box-sizing: border-box;
+            background: rgba(15, 23, 42, 0.65);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 8px;
+            padding: 0 54px 0 14px;
+            font-size: 0.98rem;
+            font-weight: 600;
+            color: #ffffff;
+            outline: none;
+            transition: all 0.2s ease;
+            -moz-appearance: textfield;
+            font-family: inherit;
+        }
+
+        .strmtool-input-number::-webkit-outer-spin-button,
+        .strmtool-input-number::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .strmtool-input-number:focus {
+            border-color: #00a4dc;
+            box-shadow: 0 0 0 3px rgba(0, 164, 220, 0.22);
+            background: rgba(15, 23, 42, 0.9);
+        }
+
+        .strmtool-input-suffix {
+            position: absolute;
+            right: 12px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #64748b;
+            background: rgba(255, 255, 255, 0.06);
+            padding: 3px 7px;
+            border-radius: 4px;
+            pointer-events: none;
+        }
+
+        .strmtool-slider-row {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin: 10px 0 8px;
+        }
+
+        .strmtool-slider {
+            flex: 1;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.14);
+            outline: none;
+            transition: background 0.2s;
+            cursor: pointer;
+        }
+
+        .strmtool-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #38bdf8;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+            cursor: pointer;
+            transition: transform 0.15s ease, background-color 0.15s ease;
+        }
+
+        .strmtool-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.18);
+            background: #00a4dc;
+        }
+
+        .strmtool-slider-number {
+            width: 80px;
+            flex-shrink: 0;
+            margin: 0;
+        }
+
+        .strmtool-field-desc {
+            font-size: 0.8rem;
+            color: #94a3b8;
+            line-height: 1.45;
+            margin: 0;
+        }
+
+        /* 底部操作工具栏 (Action Bar) */
+        .strmtool-action-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            margin-top: 32px;
+            padding: 16px 20px;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            flex-wrap: wrap;
+        }
+
+        .strmtool-action-tips {
+            font-size: 0.82rem;
+            color: #64748b;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .strmtool-action-buttons {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-left: auto;
+        }
+
+        .strmtool-btn-secondary {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 9px 18px;
+            border-radius: 8px;
+            font-size: 0.88rem;
+            font-weight: 550;
+            background: rgba(255, 255, 255, 0.06);
+            color: #cbd5e1;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            outline: none;
+            font-family: inherit;
+        }
+
+        .strmtool-btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: #ffffff;
+            border-color: rgba(255, 255, 255, 0.18);
+        }
+
+        .strmtool-btn-secondary:active {
+            transform: scale(0.98);
+        }
+
+        .strmtool-btn-primary {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            min-width: 110px;
+            padding: 9px 24px;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, #00a4dc 0%, #0284c7 100%);
+            color: #ffffff;
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            box-shadow: 0 4px 14px rgba(0, 164, 220, 0.35);
+            cursor: pointer;
+            transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+            outline: none;
+            font-family: inherit;
+        }
+
+        .strmtool-btn-primary:hover {
+            background: linear-gradient(135deg, #00b4d8 0%, #0369a1 100%);
+            box-shadow: 0 6px 18px rgba(0, 164, 220, 0.45);
+            transform: translateY(-1px);
+        }
+
+        .strmtool-btn-primary:active {
+            transform: translateY(0) scale(0.98);
+        }
+
+        .strmtool-btn-primary.success {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            border-color: rgba(52, 211, 153, 0.4);
+            box-shadow: 0 4px 14px rgba(16, 185, 129, 0.35);
+        }
+
+        .strmtool-btn-primary.loading {
+            pointer-events: none;
+            opacity: 0.85;
+        }
+
+        /* 简易 Toast 通知组件 */
+        .strmtool-toast {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%) translateY(20px);
+            background: rgba(15, 23, 42, 0.92);
+            color: #ffffff;
+            border: 1px solid rgba(56, 189, 248, 0.35);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+            padding: 10px 20px;
+            border-radius: 30px;
+            font-size: 0.88rem;
+            font-weight: 550;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: 9999;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+        }
+
+        .strmtool-toast.show {
+            opacity: 1;
+            visibility: visible;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .strmtool-toast svg {
+            width: 18px;
+            height: 18px;
+            fill: #38bdf8;
+            flex-shrink: 0;
+        }
+
+        /* 响应式调整 */
+        @media (max-width: 680px) {
+            .strmtool-container {
+                padding: 16px 14px 60px;
+            }
+            .strmtool-card {
+                padding: 16px 14px;
+            }
+            .strmtool-setting-row {
+                margin: 0;
+                padding: 12px 6px;
+            }
+            .strmtool-action-bar {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .strmtool-action-buttons {
+                margin-left: 0;
+                justify-content: flex-end;
+            }
+        }
+    </style>
+
+    <div class="strmtool-container">
+        <!-- 头部 Hero 区域 -->
+        <header class="strmtool-header">
+            <div class="strmtool-header-main">
+                <div class="strmtool-logo-badge" title="StrmTool">
+                    <img src="data:image/png;base64,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" alt="StrmTool" />
+                </div>
+                <div class="strmtool-header-title-wrap">
+                    <div class="strmtool-title-row">
+                        <h2 class="strmtool-header-title" id="pageTitle">Strm Tool Settings</h2>
+                        <span class="strmtool-version-pill">v2.4.1</span>
+                    </div>
+                    <p class="strmtool-header-desc" id="pageSubtitle">
+                        Extract audio, video codec, resolution, and subtitle streams from strm files to enhance media library display and instant playback performance
+                    </p>
+                </div>
             </div>
-        </div>
-        <div class="verticalSection">
-            <div class="inputContainer">
-                <label for="txtMaxConcurrentExtract" id="lblMaxConcurrentExtract">Maximum concurrent extractions</label>
-                <input type="number" id="txtMaxConcurrentExtract" min="1" max="50" step="1" />
-                <div class="fieldDescription" id="descMaxConcurrentExtract">Maximum number of concurrent media info extraction tasks</div>
+        </header>
+
+        <!-- 卡片 1: 自动化与缓存机制 -->
+        <section class="strmtool-card">
+            <div class="strmtool-card-header">
+                <div class="strmtool-card-title-group">
+                    <div class="strmtool-card-icon">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-9l6 4.5-6 4.5z"/>
+                        </svg>
+                    </div>
+                    <h3 class="strmtool-card-title" id="sectionAutomation">Automation & Caching</h3>
+                </div>
+                <span class="strmtool-badge strmtool-badge-info" id="badgeRecommended">Recommended</span>
             </div>
-        </div>
-        <div class="verticalSection">
-            <div class="inputContainer">
-                <label for="txtMetadataRestoreTimeout" id="lblMetadataRestoreTimeout">Metadata restore timeout (minutes)</label>
-                <input type="number" id="txtMetadataRestoreTimeout" min="1" max="30" step="1" />
-                <div class="fieldDescription" id="descMetadataRestoreTimeout">Maximum time to wait for metadata restoration when strm file size is reset (1-30 minutes)</div>
+
+            <!-- 自动提取开关 -->
+            <label class="strmtool-setting-row" for="chkEnableAutoExtract">
+                <div class="strmtool-setting-info">
+                    <span class="strmtool-setting-label" id="lblEnableAutoExtract">Automatically extract media info for new strm files</span>
+                    <span class="strmtool-setting-desc" id="descEnableAutoExtract">When enabled, new strm files will automatically extract media info in the background without manual task execution</span>
+                </div>
+                <div class="strmtool-switch">
+                    <input type="checkbox" id="chkEnableAutoExtract" />
+                    <span class="strmtool-switch-slider"></span>
+                </div>
+            </label>
+
+            <!-- 媒体信息缓存开关 -->
+            <label class="strmtool-setting-row" for="chkEnableMediaInfoCache">
+                <div class="strmtool-setting-info">
+                    <span class="strmtool-setting-label" id="lblEnableMediaInfoCache">Enable media info caching</span>
+                    <span class="strmtool-setting-desc" id="descEnableMediaInfoCache">When enabled, extracted media info will be saved to xxx.strmtool.json files to avoid repeated probing</span>
+                </div>
+                <div class="strmtool-switch">
+                    <input type="checkbox" id="chkEnableMediaInfoCache" />
+                    <span class="strmtool-switch-slider"></span>
+                </div>
+            </label>
+        </section>
+
+        <!-- 卡片 2: 性能与并发参数 -->
+        <section class="strmtool-card">
+            <div class="strmtool-card-header">
+                <div class="strmtool-card-title-group">
+                    <div class="strmtool-card-icon">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M13 2.05v3.03c3.39.49 6 3.39 6 6.92 0 .9-.18 1.75-.48 2.54l2.6 1.53c.56-1.24.88-2.62.88-4.07 0-5.18-3.95-9.45-9-9.95zM12 19c-3.87 0-7-3.13-7-7 0-3.53 2.61-6.43 6-6.92V2.05c-5.05.5-9 4.77-9 9.95 0 5.52 4.48 10 10 10 2.45 0 4.69-.89 6.43-2.36l-2.14-1.72C14.99 18.41 13.56 19 12 19z"/>
+                        </svg>
+                    </div>
+                    <h3 class="strmtool-card-title" id="sectionPerformance">Performance & Concurrency</h3>
+                </div>
             </div>
-        </div>
-        <div class="verticalSection">
-            <h4 id="lblForceRefresh" style="margin-bottom: 10px;">Force Refresh Options</h4>
-            <div class="checkboxContainer" style="margin-left: 40px;">
-                <label>
+
+            <div class="strmtool-grid">
+                <!-- 刷新延迟 (毫秒) -->
+                <div class="strmtool-field-card">
+                    <div class="strmtool-field-header">
+                        <label class="strmtool-field-label" for="txtRefreshDelay" id="lblRefreshDelay">Refresh delay</label>
+                    </div>
+                    <div class="strmtool-input-wrap">
+                        <input type="number" class="strmtool-input-number" id="txtRefreshDelay" min="0" step="100" />
+                        <span class="strmtool-input-suffix" id="unitMs">ms</span>
+                    </div>
+                    <p class="strmtool-field-desc" id="descRefreshDelay">
+                        Milliseconds to wait after each media info refresh to avoid overwhelming remote servers
+                    </p>
+                </div>
+
+                <!-- 元数据恢复超时 (分钟) -->
+                <div class="strmtool-field-card">
+                    <div class="strmtool-field-header">
+                        <label class="strmtool-field-label" for="txtMetadataRestoreTimeout" id="lblMetadataRestoreTimeout">Metadata restore timeout</label>
+                    </div>
+                    <div class="strmtool-input-wrap">
+                        <input type="number" class="strmtool-input-number" id="txtMetadataRestoreTimeout" min="1" max="30" step="1" />
+                        <span class="strmtool-input-suffix" id="unitMinutes">min</span>
+                    </div>
+                    <p class="strmtool-field-desc" id="descMetadataRestoreTimeout">
+                        Maximum time to wait for metadata restoration when strm file size is reset (1-30 minutes)
+                    </p>
+                </div>
+
+                <!-- 最大并发提取数 (支持滑块联动) -->
+                <div class="strmtool-field-card full-width">
+                    <div class="strmtool-field-header">
+                        <label class="strmtool-field-label" for="txtMaxConcurrentExtract" id="lblMaxConcurrentExtract">Maximum concurrent extractions</label>
+                        <span class="strmtool-badge strmtool-badge-warning" id="badgeRestart">Restart Required</span>
+                    </div>
+                    <div class="strmtool-slider-row">
+                        <input type="range" class="strmtool-slider" id="rngMaxConcurrentExtract" min="1" max="50" step="1" />
+                        <div class="strmtool-input-wrap strmtool-slider-number">
+                            <input type="number" class="strmtool-input-number" id="txtMaxConcurrentExtract" min="1" max="50" step="1" style="padding-right: 12px; text-align: center;" />
+                        </div>
+                    </div>
+                    <p class="strmtool-field-desc" id="descMaxConcurrentExtract">
+                        Maximum number of concurrent background media extraction tasks (1-50)
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- 卡片 3: 强制刷新选项 (高级与警示) -->
+        <section class="strmtool-card strmtool-card-warning">
+            <div class="strmtool-card-header">
+                <div class="strmtool-card-title-group">
+                    <div class="strmtool-card-icon warning">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/>
+                        </svg>
+                    </div>
+                    <h3 class="strmtool-card-title" id="lblForceRefresh">Force Refresh Options</h3>
+                </div>
+                <span class="strmtool-badge strmtool-badge-warning" id="badgeCaution">Caution</span>
+            </div>
+
+            <div class="strmtool-banner-warning">
+                <svg viewBox="0 0 24 24">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
+                </svg>
+                <span id="descForceRefreshWarning">
+                    Force refresh significantly increases remote probing requests and may trigger rate limits on third-party cloud drives or WebDAV. Only enable during maintenance or troubleshooting.
+                </span>
+            </div>
+
+            <!-- 强制刷新: 无视已有流 -->
+            <label class="strmtool-setting-row" for="chkForceRefreshIgnoreExisting">
+                <div class="strmtool-setting-info">
+                    <span class="strmtool-setting-label" id="lblForceRefreshIgnoreExisting">Ignore existing media streams</span>
+                    <span class="strmtool-setting-desc" id="descForceRefreshIgnoreExisting">When enabled, will always execute refresh regardless of whether media stream info already exists (cache can still be used)</span>
+                </div>
+                <div class="strmtool-switch warning">
                     <input type="checkbox" id="chkForceRefreshIgnoreExisting" />
-                    <span id="lblForceRefreshIgnoreExisting">Ignore existing media streams</span>
-                </label>
-                <div class="fieldDescription" id="descForceRefreshIgnoreExisting">When enabled, will always execute refresh regardless of whether media stream info already exists (cache can still be used)</div>
-            </div>
-            <div class="checkboxContainer" style="margin-left: 40px;">
-                <label>
+                    <span class="strmtool-switch-slider"></span>
+                </div>
+            </label>
+
+            <!-- 强制刷新: 无视缓存 -->
+            <label class="strmtool-setting-row" for="chkForceRefreshIgnoreCache">
+                <div class="strmtool-setting-info">
+                    <span class="strmtool-setting-label" id="lblForceRefreshIgnoreCache">Ignore cache</span>
+                    <span class="strmtool-setting-desc" id="descForceRefreshIgnoreCache">When enabled, will always fetch from remote server directly, ignoring cache files (will still check if media streams exist)</span>
+                </div>
+                <div class="strmtool-switch warning">
                     <input type="checkbox" id="chkForceRefreshIgnoreCache" />
-                    <span id="lblForceRefreshIgnoreCache">Ignore cache</span>
-                </label>
-                <div class="fieldDescription" id="descForceRefreshIgnoreCache">When enabled, will always fetch from remote server directly, ignoring cache files (will still check if media streams exist)</div>
+                    <span class="strmtool-switch-slider"></span>
+                </div>
+            </label>
+        </section>
+
+        <!-- 底部操作栏 -->
+        <footer class="strmtool-action-bar">
+            <div class="strmtool-action-tips">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                </svg>
+                <span>StrmTool for Jellyfin</span>
             </div>
+            <div class="strmtool-action-buttons">
+                <button type="button" class="strmtool-btn-secondary" id="btnResetDefaults">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+                        <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+                    </svg>
+                    <span id="btnResetDefaultsText">Reset Defaults</span>
+                </button>
+                <button type="button" class="strmtool-btn-primary" id="btnSave">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" id="iconSave">
+                        <path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/>
+                    </svg>
+                    <span id="btnSaveText">Save</span>
+                </button>
+            </div>
+        </footer>
+
+        <!-- 悬浮 Toast 提示 -->
+        <div class="strmtool-toast" id="strmtoolToast">
+            <svg viewBox="0 0 24 24" id="toastIcon">
+                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+            </svg>
+            <span id="toastMessage"></span>
         </div>
-        <br />
-        <button id="btnSave" data-role="button">Save</button>
     </div>
 
     <script>
         // ============================================================
-        // 重要：翻译资源必须与后端 Resources/ 目录下的 .json 文件保持同步！
-        // 后端资源：en.json, zh-CN.json
+        // 翻译资源（与后端 Resources/ 保持一致）
         // ============================================================
-        // 翻译资源（与后端一致的格式）
         const translations = {
             'en': {
                 'StrmTool.PageTitle': 'Strm Tool Settings',
+                'StrmTool.Subtitle': 'Extract audio, video codec, resolution, and subtitle streams from strm files to enhance media library display and instant playback performance',
+                'StrmTool.SectionAutomation': 'Automation & Caching',
+                'StrmTool.SectionPerformance': 'Performance & Concurrency',
+                'StrmTool.SectionForceRefresh': 'Force Refresh Options',
+                'StrmTool.BadgeRestartRequired': 'Restart Required',
+                'StrmTool.BadgeWarning': 'Caution',
+                'StrmTool.BadgeRecommended': 'Recommended',
+                'StrmTool.DescForceRefreshWarning': 'Force refresh significantly increases remote probing requests and may trigger rate limits on third-party cloud drives or WebDAV. Only enable during maintenance or troubleshooting.',
                 'StrmTool.LblEnableAutoExtract': 'Automatically extract media info for new strm files',
                 'StrmTool.DescEnableAutoExtract': 'When enabled, new strm files will automatically extract media info in the background without manual task execution',
                 'StrmTool.LblEnableMediaInfoCache': 'Enable media info caching',
                 'StrmTool.DescEnableMediaInfoCache': 'When enabled, extracted media info will be saved to xxx.strmtool.json files to avoid repeated probing',
-                'StrmTool.LblRefreshDelay': 'Refresh delay (ms)',
+                'StrmTool.LblRefreshDelay': 'Refresh delay',
                 'StrmTool.DescRefreshDelay': 'Milliseconds to wait after each media info refresh to avoid overwhelming remote servers',
-                'StrmTool.LblMaxConcurrentExtract': 'Maximum concurrent extractions (restart required)',
-                'StrmTool.DescMaxConcurrentExtract': 'Maximum number of concurrent media info extraction tasks',
+                'StrmTool.LblMaxConcurrentExtract': 'Maximum concurrent extractions',
+                'StrmTool.DescMaxConcurrentExtract': 'Maximum number of concurrent background media extraction tasks (1-50)',
                 'StrmTool.LblForceRefresh': 'Force Refresh Options',
                 'StrmTool.LblForceRefreshIgnoreExisting': 'Ignore existing media streams',
                 'StrmTool.DescForceRefreshIgnoreExisting': 'When enabled, will always execute refresh regardless of whether media stream info already exists (cache can still be used)',
                 'StrmTool.LblForceRefreshIgnoreCache': 'Ignore cache',
                 'StrmTool.DescForceRefreshIgnoreCache': 'When enabled, will always fetch from remote server directly, ignoring cache files (will still check if media streams exist)',
-                'StrmTool.LblMetadataRestoreTimeout': 'Metadata restore timeout (minutes)',
+                'StrmTool.LblMetadataRestoreTimeout': 'Metadata restore timeout',
                 'StrmTool.DescMetadataRestoreTimeout': 'Maximum time to wait for metadata restoration when strm file size is reset (1-30 minutes)',
-                'StrmTool.BtnSave': 'Save',
-                'StrmTool.SettingsSaved': 'Settings saved successfully'
+                'StrmTool.BtnSave': 'Save Settings',
+                'StrmTool.BtnResetDefaults': 'Reset Defaults',
+                'StrmTool.SettingsSaved': 'Settings saved successfully',
+                'StrmTool.ResetSuccess': 'Restored default settings. Click Save to apply.',
+                'StrmTool.Saving': 'Saving...',
+                'StrmTool.UnitMs': 'ms',
+                'StrmTool.UnitMinutes': 'min'
             },
             'zh': {
                 'StrmTool.PageTitle': 'Strm工具设置',
+                'StrmTool.Subtitle': '从 strm 文件中提取音轨、视频编码、分辨率与字幕流，提升媒体库展示效果与秒播起播体验',
+                'StrmTool.SectionAutomation': '自动化与缓存',
+                'StrmTool.SectionPerformance': '性能与并发控制',
+                'StrmTool.SectionForceRefresh': '强制刷新选项',
+                'StrmTool.BadgeRestartRequired': '需重启',
+                'StrmTool.BadgeWarning': '谨慎使用',
+                'StrmTool.BadgeRecommended': '推荐启用',
+                'StrmTool.DescForceRefreshWarning': '强制刷新会显著增加远程探测网络请求，可能对第三方网盘或 WebDAV 造成限流，建议仅在维护或数据异常时开启。',
                 'StrmTool.LblEnableAutoExtract': '自动提取新入库 strm 文件的媒体信息',
                 'StrmTool.DescEnableAutoExtract': '启用后，新增的 strm 文件会自动在后台执行媒体信息提取，无需手动运行计划任务',
-                'StrmTool.LblEnableMediaInfoCache': '启用媒体信息缓存',
-                'StrmTool.DescEnableMediaInfoCache': '启用后，提取的媒体信息会保存到 xxx.strmtool.json 文件中，避免重复探测',
-                'StrmTool.LblRefreshDelay': '刷新延迟 (毫秒)',
-                'StrmTool.DescRefreshDelay': '每次刷新媒体信息后等待的毫秒数，用于避免对远程服务器造成压力',
-                'StrmTool.LblMaxConcurrentExtract': '最大并发提取数（需重启生效）',
-                'StrmTool.DescMaxConcurrentExtract': '媒体信息提取任务的最大并发数',
+                'StrmTool.LblEnableMediaInfoCache': '启用媒体信息本地缓存',
+                'StrmTool.DescEnableMediaInfoCache': '提取的媒体信息将缓存为同目录下 .strmtool.json 文件，下次探测秒级复用，极大降低远程探测开销',
+                'StrmTool.LblRefreshDelay': '提取延迟间隔',
+                'StrmTool.DescRefreshDelay': '每次完成单项探测后等待的毫秒数，平滑请求节奏，防止对网盘或上游服务造成高频突发压力',
+                'StrmTool.LblMaxConcurrentExtract': '最大并发提取数',
+                'StrmTool.DescMaxConcurrentExtract': '后台同时执行媒体信息提取的任务数量（1-50，修改后需重启 Jellyfin 生效）',
                 'StrmTool.LblForceRefresh': '强制刷新选项',
                 'StrmTool.LblForceRefreshIgnoreExisting': '无视是否已有媒体流',
-                'StrmTool.DescForceRefreshIgnoreExisting': '启用后，无论是否已存在媒体信息都会执行刷新（仍可利用缓存）',
-                'StrmTool.LblForceRefreshIgnoreCache': '无视缓存',
-                'StrmTool.DescForceRefreshIgnoreCache': '启用后，直接从远程服务器获取信息，忽略缓存文件（仍会判断是否已有媒体信息）',
-                'StrmTool.LblMetadataRestoreTimeout': '元数据恢复超时（分钟）',
-                'StrmTool.DescMetadataRestoreTimeout': '当 strm 文件大小被重置时，等待元数据恢复的最大时间（1-30分钟）',
-                'StrmTool.BtnSave': '保存',
-                'StrmTool.SettingsSaved': '设置已保存'
+                'StrmTool.DescForceRefreshIgnoreExisting': '即使 Jellyfin 库中已记录媒体流信息，仍执行刷新（可命中本地缓存）',
+                'StrmTool.LblForceRefreshIgnoreCache': '无视缓存强制远端探测',
+                'StrmTool.DescForceRefreshIgnoreCache': '忽略已有的 .strmtool.json 缓存文件，直接发起远端网络连接重新探测流信息',
+                'StrmTool.LblMetadataRestoreTimeout': '元数据恢复超时限制',
+                'StrmTool.DescMetadataRestoreTimeout': '当 strm 文件大小被更新重置时，等待元数据恢复的最大超时时间（1-30 分钟）',
+                'StrmTool.BtnSave': '保存设置',
+                'StrmTool.BtnResetDefaults': '恢复默认',
+                'StrmTool.SettingsSaved': '设置已成功保存',
+                'StrmTool.ResetSuccess': '已恢复默认设置，点击保存后生效',
+                'StrmTool.Saving': '正在保存...',
+                'StrmTool.UnitMs': '毫秒',
+                'StrmTool.UnitMinutes': '分钟'
             }
         };
+
+        // 作用域选择器
+        const getElement = (id) => document.querySelector('#' + id);
 
         // 获取当前语言
         function getCurrentCulture() {
             try {
-                // 尝试从多个可能的位置获取语言设置
-                // 1. 从 Jellyfin 配置获取
-                // 2. 从页面元素或属性获取
-                // 3. 从系统语言设置获取
-                
-                // 尝试获取 dashboardCulture（Jellyfin 可能使用的变量）
                 if (typeof window.dashboardCulture !== 'undefined' && window.dashboardCulture) {
                     return window.dashboardCulture;
                 }
-                
-                // 尝试获取 Culture（Jellyfin 可能使用的变量）
                 if (typeof window.Culture !== 'undefined' && window.Culture) {
                     return window.Culture;
                 }
-                
-                // 尝试从 localStorage 或其他存储获取
                 if (typeof localStorage !== 'undefined') {
                     const storedCulture = localStorage.getItem('jellyfin-culture') || 
                                            localStorage.getItem('culture') || 
                                            localStorage.getItem('ui-culture');
-                    if (storedCulture) {
-                        return storedCulture;
-                    }
+                    if (storedCulture) return storedCulture;
                 }
-                
-                // 尝试从 HTML 标签获取语言设置
                 const htmlLang = document.documentElement.getAttribute('lang');
-                if (htmlLang) {
-                    return htmlLang;
-                }
-                
-                // 最后使用浏览器语言设置
-                const browserLang = navigator.language || navigator.userLanguage || 'en';
-                return browserLang;
-                
-            } catch (e) {
-                console.error('无法获取语言设置:', e);
-                return 'en'; // 默认使用英文，与后端一致
+                if (htmlLang) return htmlLang;
+                return navigator.language || navigator.userLanguage || 'en';
+            } catch {
+                return 'en';
             }
         }
 
-        // 翻译函数（与后端一致的格式）
+        // 翻译函数
         function t(key) {
             const culture = getCurrentCulture();
             const langCode = culture.split('-')[0];
-            
-            // 尝试使用完整文化代码
-            if (translations[culture] && translations[culture][key]) {
-                return translations[culture][key];
-            }
-            
-            // 尝试使用语言前缀
-            if (translations[langCode] && translations[langCode][key]) {
-                return translations[langCode][key];
-            }
-            
-            // 回退到英文
+            if (translations[culture] && translations[culture][key]) return translations[culture][key];
+            if (translations[langCode] && translations[langCode][key]) return translations[langCode][key];
             return translations['en'][key] || key;
+        }
+
+        // 轻量 Toast 提示
+        let toastTimeout = null;
+        function showToast(message) {
+            const toast = getElement('strmtoolToast');
+            const toastMsg = getElement('toastMessage');
+            if (!toast || !toastMsg) return;
+
+            toastMsg.textContent = message;
+            toast.classList.add('show');
+
+            if (toastTimeout) clearTimeout(toastTimeout);
+            toastTimeout = setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
         }
 
         // 应用翻译
         function applyTranslations() {
-            document.getElementById('pageTitle').textContent = t('StrmTool.PageTitle');
-            document.getElementById('lblEnableAutoExtract').textContent = t('StrmTool.LblEnableAutoExtract');
-            document.getElementById('descEnableAutoExtract').textContent = t('StrmTool.DescEnableAutoExtract');
-            document.getElementById('lblEnableMediaInfoCache').textContent = t('StrmTool.LblEnableMediaInfoCache');
-            document.getElementById('descEnableMediaInfoCache').textContent = t('StrmTool.DescEnableMediaInfoCache');
-            document.getElementById('lblRefreshDelay').textContent = t('StrmTool.LblRefreshDelay');
-            document.getElementById('descRefreshDelay').textContent = t('StrmTool.DescRefreshDelay');
-            document.getElementById('lblMaxConcurrentExtract').textContent = t('StrmTool.LblMaxConcurrentExtract');
-            document.getElementById('descMaxConcurrentExtract').textContent = t('StrmTool.DescMaxConcurrentExtract');
-            document.getElementById('lblForceRefresh').textContent = t('StrmTool.LblForceRefresh');
-            document.getElementById('lblForceRefreshIgnoreExisting').textContent = t('StrmTool.LblForceRefreshIgnoreExisting');
-            document.getElementById('descForceRefreshIgnoreExisting').textContent = t('StrmTool.DescForceRefreshIgnoreExisting');
-            document.getElementById('lblForceRefreshIgnoreCache').textContent = t('StrmTool.LblForceRefreshIgnoreCache');
-            document.getElementById('descForceRefreshIgnoreCache').textContent = t('StrmTool.DescForceRefreshIgnoreCache');
-            document.getElementById('lblMetadataRestoreTimeout').textContent = t('StrmTool.LblMetadataRestoreTimeout');
-            document.getElementById('descMetadataRestoreTimeout').textContent = t('StrmTool.DescMetadataRestoreTimeout');
-            document.getElementById('btnSave').textContent = t('StrmTool.BtnSave');
-        }
+            const textBindings = [
+                ['pageTitle', 'StrmTool.PageTitle'],
+                ['pageSubtitle', 'StrmTool.Subtitle'],
+                ['sectionAutomation', 'StrmTool.SectionAutomation'],
+                ['sectionPerformance', 'StrmTool.SectionPerformance'],
+                ['lblEnableAutoExtract', 'StrmTool.LblEnableAutoExtract'],
+                ['descEnableAutoExtract', 'StrmTool.DescEnableAutoExtract'],
+                ['lblEnableMediaInfoCache', 'StrmTool.LblEnableMediaInfoCache'],
+                ['descEnableMediaInfoCache', 'StrmTool.DescEnableMediaInfoCache'],
+                ['lblRefreshDelay', 'StrmTool.LblRefreshDelay'],
+                ['descRefreshDelay', 'StrmTool.DescRefreshDelay'],
+                ['lblMaxConcurrentExtract', 'StrmTool.LblMaxConcurrentExtract'],
+                ['descMaxConcurrentExtract', 'StrmTool.DescMaxConcurrentExtract'],
+                ['lblMetadataRestoreTimeout', 'StrmTool.LblMetadataRestoreTimeout'],
+                ['descMetadataRestoreTimeout', 'StrmTool.DescMetadataRestoreTimeout'],
+                ['lblForceRefresh', 'StrmTool.LblForceRefresh'],
+                ['descForceRefreshWarning', 'StrmTool.DescForceRefreshWarning'],
+                ['lblForceRefreshIgnoreExisting', 'StrmTool.LblForceRefreshIgnoreExisting'],
+                ['descForceRefreshIgnoreExisting', 'StrmTool.DescForceRefreshIgnoreExisting'],
+                ['lblForceRefreshIgnoreCache', 'StrmTool.LblForceRefreshIgnoreCache'],
+                ['descForceRefreshIgnoreCache', 'StrmTool.DescForceRefreshIgnoreCache'],
+                ['btnSaveText', 'StrmTool.BtnSave'],
+                ['btnResetDefaultsText', 'StrmTool.BtnResetDefaults'],
+                ['badgeRestart', 'StrmTool.BadgeRestartRequired'],
+                ['badgeCaution', 'StrmTool.BadgeWarning'],
+                ['badgeRecommended', 'StrmTool.BadgeRecommended'],
+                ['unitMs', 'StrmTool.UnitMs'],
+                ['unitMinutes', 'StrmTool.UnitMinutes']
+            ];
 
-        var form = this;
-
-        function loadConfig() {
-            ApiClient.getPluginConfiguration('6107fc8c-883a-4171-b70e-7590658706B9').then(function(config) {
-                document.getElementById('chkEnableAutoExtract').checked = config.EnableAutoExtract !== false;
-                document.getElementById('chkEnableMediaInfoCache').checked = config.EnableMediaInfoCache !== false;
-                document.getElementById('txtRefreshDelay').value = config.RefreshDelayMs ?? 1000;
-                document.getElementById('txtMaxConcurrentExtract').value = config.MaxConcurrentExtract ?? 5;
-                document.getElementById('chkForceRefreshIgnoreExisting').checked = config.ForceRefreshIgnoreExisting === true;
-                document.getElementById('chkForceRefreshIgnoreCache').checked = config.ForceRefreshIgnoreCache === true;
-                document.getElementById('txtMetadataRestoreTimeout').value = config.MetadataRestoreTimeoutMinutes ?? 5;
+            textBindings.forEach(([id, key]) => {
+                const el = getElement(id);
+                if (el) el.textContent = t(key);
             });
         }
 
+        // 并发滑块与数字框双向绑定
+        const rngConcurrent = getElement('rngMaxConcurrentExtract');
+        const txtConcurrent = getElement('txtMaxConcurrentExtract');
+        if (rngConcurrent && txtConcurrent) {
+            rngConcurrent.addEventListener('input', function() {
+                txtConcurrent.value = this.value;
+            });
+            txtConcurrent.addEventListener('input', function() {
+                let val = parseInt(this.value, 10);
+                if (!Number.isNaN(val)) {
+                    val = Math.min(50, Math.max(1, val));
+                    rngConcurrent.value = val;
+                }
+            });
+        }
+
+        // 加载配置
+        function loadConfig() {
+            if (typeof ApiClient === 'undefined' || !ApiClient.getPluginConfiguration) {
+                return;
+            }
+
+            ApiClient.getPluginConfiguration('6107fc8c-883a-4171-b70e-7590658706B9').then(function(config) {
+                if (!config) return;
+                const chkAuto = getElement('chkEnableAutoExtract');
+                const chkCache = getElement('chkEnableMediaInfoCache');
+                const txtDelay = getElement('txtRefreshDelay');
+                const chkIgnoreExisting = getElement('chkForceRefreshIgnoreExisting');
+                const chkIgnoreCache = getElement('chkForceRefreshIgnoreCache');
+                const txtTimeout = getElement('txtMetadataRestoreTimeout');
+
+                if (chkAuto) chkAuto.checked = config.EnableAutoExtract !== false;
+                if (chkCache) chkCache.checked = config.EnableMediaInfoCache !== false;
+                if (txtDelay) txtDelay.value = config.RefreshDelayMs ?? 1000;
+                
+                const concurrentVal = config.MaxConcurrentExtract ?? 5;
+                if (txtConcurrent) txtConcurrent.value = concurrentVal;
+                if (rngConcurrent) rngConcurrent.value = concurrentVal;
+
+                if (chkIgnoreExisting) chkIgnoreExisting.checked = config.ForceRefreshIgnoreExisting === true;
+                if (chkIgnoreCache) chkIgnoreCache.checked = config.ForceRefreshIgnoreCache === true;
+                if (txtTimeout) txtTimeout.value = config.MetadataRestoreTimeoutMinutes ?? 5;
+            }).catch(function() {
+                // 静默处理或保持原配置
+            });
+        }
+
+        // 恢复默认配置
+        function resetDefaults() {
+            const chkAuto = getElement('chkEnableAutoExtract');
+            const chkCache = getElement('chkEnableMediaInfoCache');
+            const txtDelay = getElement('txtRefreshDelay');
+            const chkIgnoreExisting = getElement('chkForceRefreshIgnoreExisting');
+            const chkIgnoreCache = getElement('chkForceRefreshIgnoreCache');
+            const txtTimeout = getElement('txtMetadataRestoreTimeout');
+
+            if (chkAuto) chkAuto.checked = true;
+            if (chkCache) chkCache.checked = true;
+            if (txtDelay) txtDelay.value = 1000;
+            if (txtConcurrent) txtConcurrent.value = 5;
+            if (rngConcurrent) rngConcurrent.value = 5;
+            if (txtTimeout) txtTimeout.value = 5;
+            if (chkIgnoreExisting) chkIgnoreExisting.checked = false;
+            if (chkIgnoreCache) chkIgnoreCache.checked = false;
+
+            showToast(t('StrmTool.ResetSuccess'));
+        }
+
+        // 保存配置
         function saveConfig() {
-            const refreshDelayInput = parseInt(document.getElementById('txtRefreshDelay').value, 10);
-            const maxConcurrentInput = parseInt(document.getElementById('txtMaxConcurrentExtract').value, 10);
-            const metadataRestoreTimeoutInput = parseInt(document.getElementById('txtMetadataRestoreTimeout').value, 10);
+            const btnSave = getElement('btnSave');
+            const btnSaveText = getElement('btnSaveText');
+            const txtDelay = getElement('txtRefreshDelay');
+            const txtTimeout = getElement('txtMetadataRestoreTimeout');
+            const chkAuto = getElement('chkEnableAutoExtract');
+            const chkCache = getElement('chkEnableMediaInfoCache');
+            const chkIgnoreExisting = getElement('chkForceRefreshIgnoreExisting');
+            const chkIgnoreCache = getElement('chkForceRefreshIgnoreCache');
+
+            const refreshDelayInput = parseInt(txtDelay ? txtDelay.value : '1000', 10);
+            const maxConcurrentInput = parseInt(txtConcurrent ? txtConcurrent.value : '5', 10);
+            const metadataRestoreTimeoutInput = parseInt(txtTimeout ? txtTimeout.value : '5', 10);
+
+            const refreshDelay = Math.max(0, Number.isNaN(refreshDelayInput) ? 1000 : refreshDelayInput);
+            const maxConcurrent = Math.min(50, Math.max(1, Number.isNaN(maxConcurrentInput) ? 5 : maxConcurrentInput));
+            const metadataRestoreTimeout = Math.min(30, Math.max(1, Number.isNaN(metadataRestoreTimeoutInput) ? 5 : metadataRestoreTimeoutInput));
+
+            if (txtDelay) txtDelay.value = refreshDelay;
+            if (txtConcurrent) txtConcurrent.value = maxConcurrent;
+            if (rngConcurrent) rngConcurrent.value = maxConcurrent;
+            if (txtTimeout) txtTimeout.value = metadataRestoreTimeout;
+
             var config = {
-                EnableAutoExtract: document.getElementById('chkEnableAutoExtract').checked,
-                EnableMediaInfoCache: document.getElementById('chkEnableMediaInfoCache').checked,
-                RefreshDelayMs: Number.isNaN(refreshDelayInput) ? 1000 : refreshDelayInput,
-                MaxConcurrentExtract: Number.isNaN(maxConcurrentInput) ? 5 : maxConcurrentInput,
-                ForceRefreshIgnoreExisting: document.getElementById('chkForceRefreshIgnoreExisting').checked,
-                ForceRefreshIgnoreCache: document.getElementById('chkForceRefreshIgnoreCache').checked,
-                MetadataRestoreTimeoutMinutes: Number.isNaN(metadataRestoreTimeoutInput) ? 5 : metadataRestoreTimeoutInput
+                EnableAutoExtract: chkAuto ? chkAuto.checked : true,
+                EnableMediaInfoCache: chkCache ? chkCache.checked : true,
+                RefreshDelayMs: refreshDelay,
+                MaxConcurrentExtract: maxConcurrent,
+                ForceRefreshIgnoreExisting: chkIgnoreExisting ? chkIgnoreExisting.checked : false,
+                ForceRefreshIgnoreCache: chkIgnoreCache ? chkIgnoreCache.checked : false,
+                MetadataRestoreTimeoutMinutes: metadataRestoreTimeout
             };
 
-            ApiClient.updatePluginConfiguration('6107fc8c-883a-4171-b70e-7590658706B9', config).then(function() {
-                // 显示保存成功提示（纯文本）
-                Dashboard.alert(t('StrmTool.SettingsSaved'));
-            });
+            // 按钮 Loading 状态
+            if (btnSave && btnSaveText) {
+                btnSave.classList.add('loading');
+                btnSaveText.textContent = t('StrmTool.Saving');
+            }
+
+            if (typeof ApiClient !== 'undefined' && ApiClient.updatePluginConfiguration) {
+                ApiClient.updatePluginConfiguration('6107fc8c-883a-4171-b70e-7590658706B9', config).then(function() {
+                    if (btnSave && btnSaveText) {
+                        btnSave.classList.remove('loading');
+                        btnSave.classList.add('success');
+                        btnSaveText.textContent = t('StrmTool.SettingsSaved');
+
+                        setTimeout(() => {
+                            btnSave.classList.remove('success');
+                            btnSaveText.textContent = t('StrmTool.BtnSave');
+                        }, 2000);
+                    }
+
+                    showToast(t('StrmTool.SettingsSaved'));
+
+                    if (typeof Dashboard !== 'undefined' && Dashboard.alert) {
+                        Dashboard.alert(t('StrmTool.SettingsSaved'));
+                    }
+                }).catch(function() {
+                    if (btnSave && btnSaveText) {
+                        btnSave.classList.remove('loading');
+                        btnSaveText.textContent = t('StrmTool.BtnSave');
+                    }
+                    showToast('Failed to save settings');
+                });
+            } else {
+                // 本地或预览环境兜底
+                setTimeout(function() {
+                    if (btnSave && btnSaveText) {
+                        btnSave.classList.remove('loading');
+                        btnSave.classList.add('success');
+                        btnSaveText.textContent = t('StrmTool.SettingsSaved');
+
+                        setTimeout(() => {
+                            btnSave.classList.remove('success');
+                            btnSaveText.textContent = t('StrmTool.BtnSave');
+                        }, 2000);
+                    }
+                    showToast(t('StrmTool.SettingsSaved'));
+                }, 400);
+            }
         }
 
-        document.getElementById('btnSave').addEventListener('click', saveConfig);
+        // 绑定按钮事件
+        const btnSaveElem = getElement('btnSave');
+        if (btnSaveElem) {
+            btnSaveElem.addEventListener('click', saveConfig);
+        }
 
-        // 页面加载时应用翻译和加载配置
+        const btnResetElem = getElement('btnResetDefaults');
+        if (btnResetElem) {
+            btnResetElem.addEventListener('click', resetDefaults);
+        }
+
+        // 页面初始化
         function initializePage() {
-            console.log('初始化设置页面');
             applyTranslations();
             loadConfig();
         }
 
-        // 监听页面加载
+        const pageElement = getElement('configPage');
+        if (pageElement) {
+            pageElement.addEventListener('viewshow', initializePage);
+            pageElement.addEventListener('pageshow', initializePage);
+        }
+
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', initializePage);
         } else {
-            // 页面已经加载完成
             initializePage();
         }
-        
-        // 页面可见性变化时重新加载配置
+
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
                 loadConfig();

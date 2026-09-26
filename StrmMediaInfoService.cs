@@ -26,6 +26,7 @@ namespace StrmTool
         public long Size { get; set; }
         public long? RunTimeTicks { get; set; }
         public string Container { get; set; }
+        public string StrmContentHash { get; set; }
         public bool Success => MediaStreams != null && MediaStreams.Count > 0;
     }
 
@@ -185,7 +186,7 @@ namespace StrmTool
 
             return strmItems
                 .Where(i => i != null && !string.IsNullOrWhiteSpace(i.Path))
-                .GroupBy(i => i.Path, StringComparer.OrdinalIgnoreCase)
+                .GroupBy(i => i.Path, OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase)
                 .Select(g => g.First())
                 .ToList();
         }
@@ -239,7 +240,20 @@ namespace StrmTool
 
             try
             {
+                var strmContentHash = MediaInfoCache.GetStrmContentHash(item.Path);
+                if (strmContentHash == null)
+                {
+                    _logger.LogWarning("STRM file unreadable or empty: {Path}; skipping probe", item.Path);
+                    return result;
+                }
+
                 var strmContent = ReadStrmSourcePath(item.Path);
+                if (!string.Equals(strmContentHash, MediaInfoCache.GetStrmContentHash(item.Path), StringComparison.Ordinal))
+                {
+                    _logger.LogWarning("STRM content changed while reading {Path}; skipping probe", item.Path);
+                    return result;
+                }
+
                 if (string.IsNullOrWhiteSpace(strmContent))
                 {
                     _logger.LogWarning("STRM file is empty: {Path}", item.Path);
@@ -262,6 +276,12 @@ namespace StrmTool
 
                 if (mediaInfo?.MediaStreams != null && mediaInfo.MediaStreams.Count > 0)
                 {
+                    if (!string.Equals(strmContentHash, MediaInfoCache.GetStrmContentHash(item.Path), StringComparison.Ordinal))
+                    {
+                        _logger.LogWarning("STRM content changed during probing {Path}; discarding result", item.Path);
+                        return result;
+                    }
+
                     // 保存媒体流信息（不保存 Item 元数据，避免与 Jellyfin 的元数据重置产生竞态条件）
                     // Item 元数据会在 ItemUpdateListener 中从缓存恢复
                     _mediaStreamRepository.SaveMediaStreams(item.Id, mediaInfo.MediaStreams, cancellationToken);
@@ -271,6 +291,7 @@ namespace StrmTool
                     result.Size = mediaInfo.Size.GetValueOrDefault();
                     result.RunTimeTicks = mediaInfo.RunTimeTicks;
                     result.Container = mediaInfo.Container;
+                    result.StrmContentHash = strmContentHash;
 
                     _logger.LogDebug("Successfully saved {Count} media streams for {Name} (item metadata will be restored later via cache)",
                         mediaInfo.MediaStreams.Count, fileName);

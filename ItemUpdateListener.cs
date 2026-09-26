@@ -19,8 +19,9 @@ namespace StrmTool
         private readonly ILogger _logger;
         private readonly ILibraryManager _libraryManager;
         private readonly MediaInfoCache _mediaCache;
-        private readonly ConcurrentDictionary<Guid, Task> _runningTasks;
-        private PluginConfiguration _config;
+        private readonly ConcurrentDictionary<Guid, TaskCompletionSource<bool>> _runningTasks;
+        private readonly CancellationTokenSource _disposeCts = new CancellationTokenSource();
+        private volatile PluginConfiguration _config;
         private volatile bool _isDisposed = false;
 
         public ItemUpdateListener(
@@ -40,7 +41,7 @@ namespace StrmTool
             _logger = logger;
             _libraryManager = libraryManager;
             _mediaCache = mediaCache ?? new MediaInfoCache(logger);
-            _runningTasks = new ConcurrentDictionary<Guid, Task>();
+            _runningTasks = new ConcurrentDictionary<Guid, TaskCompletionSource<bool>>();
             _config = config;
 
             // 订阅Item更新事件
@@ -59,49 +60,6 @@ namespace StrmTool
             }
         }
 
-        /// <summary>
-        /// 清理已完成的任务，防止内存泄漏
-        /// </summary>
-        private void CleanupCompletedTasks()
-        {
-            // 仅当任务数量超过阈值时才清理，减少开销
-            if (_runningTasks.Count <= 100)
-            {
-                return;
-            }
-
-            try
-            {
-                int removed = 0;
-                foreach (var kvp in _runningTasks)
-                {
-                    if (kvp.Value.IsCompleted)
-                    {
-                        // 观察任务异常（防止未观察到的异常）
-                        if (kvp.Value.Exception != null)
-                        {
-                            _logger.LogDebug(kvp.Value.Exception, "Observed completed task exception");
-                        }
-
-                        if (_runningTasks.TryRemove(kvp.Key, out _))
-                        {
-                            removed++;
-                        }
-                    }
-                }
-
-                if (removed > 0)
-                {
-                    _logger.LogDebug("Cleaned up {Count} completed tasks, remaining: {Remaining}",
-                        removed, _runningTasks.Count);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error cleaning up completed tasks");
-            }
-        }
-
         private void OnItemUpdated(object sender, ItemChangeEventArgs e)
         {
             if (_isDisposed)
@@ -110,6 +68,11 @@ namespace StrmTool
             try
             {
                 RefreshConfig();
+
+                if (_config == null || !_config.EnableMediaInfoCache || _config.ForceRefreshIgnoreCache)
+                {
+                    return;
+                }
 
                 // 检查是否是strm文件
                 if (!StrmMediaInfoService.IsStrmFile(e.Item.Path))
@@ -126,20 +89,7 @@ namespace StrmTool
                     return;
                 }
 
-                // 检查Size是否被重置（当前Size明显小于缓存的Size）
-                bool sizeReset = cacheData.Size > 0 && item.Size < cacheData.Size / 10;
-                bool needsUpdate = sizeReset;
-
-                if (!needsUpdate)
-                {
-                    // 检查其他元数据是否丢失
-                    if (cacheData.RunTimeTicks.HasValue && !item.RunTimeTicks.HasValue)
-                    {
-                        needsUpdate = true;
-                    }
-                }
-
-                if (!needsUpdate)
+                if (!NeedsRestore(item, cacheData))
                 {
                     return;
                 }
@@ -148,57 +98,31 @@ namespace StrmTool
                 // 同时作为任务跟踪键，避免同一 item 创建多个任务
                 var taskKey = item.Id;
 
-                // 先检查是否已在处理中
-                if (_runningTasks.ContainsKey(taskKey))
+                // 先注册完成信号，再启动真正的异步任务，保证去重和 Dispose 等待覆盖整个恢复过程。
+                var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!_runningTasks.TryAdd(taskKey, completion))
                 {
                     _logger.LogDebug("Item {Name} already being restored, skipping", fileName);
                     return;
                 }
 
-                // 创建任务但不立即启动
-                var task = new Task(async () =>
+                if (_isDisposed)
                 {
-                    try
-                    {
-                        var timeoutMinutes = _config?.MetadataRestoreTimeoutMinutes ?? 5;
-                        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(timeoutMinutes));
-
-                        // 重新获取最新 item，避免使用可能已过时的对象
-                        var latestItem = _libraryManager.GetItemById(item.Id);
-                        if (latestItem == null)
-                        {
-                            _logger.LogWarning("Item {Name} not found in library, skipping restore", fileName);
-                            return;
-                        }
-
-                        await RestoreItemMetadataAsync(latestItem, cacheData, cts.Token).ConfigureAwait(false);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        _logger.LogDebug("Restore operation cancelled for {Name}", fileName);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error restoring metadata for {Name}", fileName);
-                    }
-                    finally
-                    {
-                        _runningTasks.TryRemove(taskKey, out _);
-                    }
-                });
-
-                // 原子性添加，只有成功添加才启动任务
-                if (!_runningTasks.TryAdd(taskKey, task))
-                {
-                    _logger.LogDebug("Item {Name} already being restored, skipping", fileName);
+                    _runningTasks.TryRemove(taskKey, out _);
+                    completion.TrySetResult(true);
                     return;
                 }
 
-                // 成功添加后才启动任务
-                task.Start(TaskScheduler.Default);
-
-                // 定期清理已完成的任务，防止内存泄漏
-                CleanupCompletedTasks();
+                try
+                {
+                    _ = Task.Run(() => RestoreItemMetadataAsync(taskKey, fileName, completion));
+                }
+                catch
+                {
+                    _runningTasks.TryRemove(taskKey, out _);
+                    completion.TrySetResult(true);
+                    throw;
+                }
             }
             catch (Exception ex)
             {
@@ -206,29 +130,87 @@ namespace StrmTool
             }
         }
 
-        private async Task RestoreItemMetadataAsync(BaseItem item, MediaInfoCacheData cacheData, CancellationToken cancellationToken)
+        private static bool NeedsRestore(BaseItem item, MediaInfoCacheData cacheData)
         {
-            var fileName = Path.GetFileNameWithoutExtension(item.Path);
+            return IsSizeReset(item, cacheData)
+                || (cacheData.RunTimeTicks.HasValue && !item.RunTimeTicks.HasValue)
+                || (!string.IsNullOrEmpty(cacheData.Container) && string.IsNullOrEmpty(item.Container));
+        }
 
+        private static bool IsSizeReset(BaseItem item, MediaInfoCacheData cacheData)
+        {
+            return cacheData.Size > 0 && item.Size < cacheData.Size / 10;
+        }
+
+        private async Task RestoreItemMetadataAsync(Guid taskKey, string fileName, TaskCompletionSource<bool> completion)
+        {
             try
             {
-                _logger.LogInformation("Restoring metadata for {Name} (Size: {OldSize} -> {NewSize})",
-                    fileName, item.Size, cacheData.Size);
+                if (_isDisposed)
+                {
+                    return;
+                }
+
+                RefreshConfig();
+                var config = _config;
+                if (config == null || !config.EnableMediaInfoCache || config.ForceRefreshIgnoreCache)
+                {
+                    return;
+                }
+
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(_disposeCts.Token);
+                cts.CancelAfter(TimeSpan.FromMinutes(config.MetadataRestoreTimeoutMinutes));
+
+                // 排队期间 item、路径或缓存都可能变化；写入前重新读取并只恢复仍丢失的字段。
+                var item = _libraryManager.GetItemById(taskKey);
+                if (item == null || !StrmMediaInfoService.IsStrmFile(item.Path))
+                {
+                    _logger.LogDebug("Item {Name} is no longer available for restore", fileName);
+                    return;
+                }
+
+                if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) || !NeedsRestore(item, cacheData))
+                {
+                    return;
+                }
+
+                cts.Token.ThrowIfCancellationRequested();
+                _logger.LogInformation("Restoring metadata for {Name}", fileName);
 
                 // 恢复元数据（只保留前端显示和 Jellyfin 内部需要的字段）
                 // 注意：Jellyfin 不会重置媒体流信息，因此不需要恢复 MediaStreams
-                item.Size = cacheData.Size;
-                item.RunTimeTicks = cacheData.RunTimeTicks;
-                item.Container = cacheData.Container;
+                if (IsSizeReset(item, cacheData))
+                {
+                    item.Size = cacheData.Size;
+                }
+
+                if (cacheData.RunTimeTicks.HasValue && !item.RunTimeTicks.HasValue)
+                {
+                    item.RunTimeTicks = cacheData.RunTimeTicks;
+                }
+
+                if (!string.IsNullOrEmpty(cacheData.Container) && string.IsNullOrEmpty(item.Container))
+                {
+                    item.Container = cacheData.Container;
+                }
 
                 // 持久化修改
-                await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
+                await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cts.Token).ConfigureAwait(false);
 
                 _logger.LogInformation("Successfully restored metadata for {Name}", fileName);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogDebug("Restore operation cancelled for {Name}", fileName);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to restore metadata for {Name}", fileName);
+            }
+            finally
+            {
+                _runningTasks.TryRemove(taskKey, out _);
+                completion.TrySetResult(true);
             }
         }
 
@@ -247,29 +229,26 @@ namespace StrmTool
             {
             }
 
-            // 等待所有后台任务完成（最多等待30秒）
-            // 使用 Task.Run 避免同步阻塞导致的潜在死锁
+            _disposeCts.Cancel();
+
+            // 等待真正的恢复操作完成（最多等待30秒）
             try
             {
-                var allTasks = _runningTasks.Values.ToArray();
-                if (allTasks.Length > 0)
+                var allTasks = _runningTasks.Values.Select(source => source.Task).ToArray();
+                if (allTasks.Length > 0 && !Task.WaitAll(allTasks, TimeSpan.FromSeconds(30)))
                 {
-                    Task.Run(async () =>
-                    {
-                        var waitTask = Task.WhenAll(allTasks);
-                        var timeoutTask = Task.Delay(TimeSpan.FromSeconds(30));
-                        var completedTask = await Task.WhenAny(waitTask, timeoutTask).ConfigureAwait(false);
-
-                        if (completedTask == timeoutTask)
-                        {
-                            _logger.LogWarning("Timeout waiting for {Count} background tasks to complete", allTasks.Length);
-                        }
-                    }).Wait(TimeSpan.FromSeconds(30));
+                    _logger.LogWarning("Timeout waiting for {Count} background tasks to complete", allTasks.Length);
+                    _ = Task.WhenAll(allTasks).ContinueWith(_ => _disposeCts.Dispose(), TaskScheduler.Default);
+                }
+                else
+                {
+                    _disposeCts.Dispose();
                 }
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Error waiting for background tasks to complete");
+                _disposeCts.Dispose();
             }
 
             _logger.LogInformation("Item update listener disposed");

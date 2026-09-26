@@ -7,6 +7,7 @@ namespace StrmTool
     {
         private int _refreshDelayMs = 1000;
         private int _maxConcurrentExtract = 5;
+        private int _metadataRestoreTimeoutMinutes = 5;
 
         /// <summary>
         /// 刷新延迟时间（毫秒）
@@ -49,6 +50,10 @@ namespace StrmTool
         /// <summary>
         /// 元数据恢复超时时间（分钟）
         /// </summary>
-        public int MetadataRestoreTimeoutMinutes { get; set; } = 5;
+        public int MetadataRestoreTimeoutMinutes
+        {
+            get => _metadataRestoreTimeoutMinutes;
+            set => _metadataRestoreTimeoutMinutes = Math.Clamp(value, 1, 30);
+        }
     }
 }

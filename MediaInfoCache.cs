@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -122,7 +124,7 @@ namespace StrmTool
         /// <summary>
         /// 验证缓存数据是否有效
         /// </summary>
-        private bool ValidateCacheData(MediaInfoCacheData cache, bool requireMediaStreams = true)
+        private bool ValidateCacheData(MediaInfoCacheData cache, string strmPath, bool requireMediaStreams = true)
         {
             if (cache?.IsValid != true)
                 return false;
@@ -130,7 +132,37 @@ namespace StrmTool
             if (requireMediaStreams && cache.MediaStreams == null)
                 return false;
 
-            return true;
+            // 旧缓存没有内容指纹，无法判断 STRM 是否已更换媒体源。
+            // STRM 文件暂不可读（哈希为 null）时同样判为无效，触发重探测而非使用过期缓存。
+            return !string.IsNullOrEmpty(cache.StrmContentHash) &&
+                   string.Equals(cache.StrmContentHash, GetStrmContentHash(strmPath), StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// 计算 STRM 有效内容的 SHA256 指纹。
+        /// 与 ReadStrmSourcePath 的读取语义一致：取首个非空白行并 trim，
+        /// 避免纯空白/换行差异导致缓存失效与不必要的重探测。
+        /// 文件不可读或无有效内容时返回 null，由调用方按"缓存无效/跳过探测"降级处理。
+        /// </summary>
+        internal static string GetStrmContentHash(string strmPath)
+        {
+            try
+            {
+                foreach (var line in File.ReadLines(strmPath))
+                {
+                    var trimmed = line.Trim();
+                    if (trimmed.Length > 0)
+                    {
+                        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(trimmed)));
+                    }
+                }
+
+                return null;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
+            {
+                return null;
+            }
         }
 
         /// <summary>
@@ -149,7 +181,7 @@ namespace StrmTool
                 var json = File.ReadAllText(cachePath);
                 var cache = JsonSerializer.Deserialize<MediaInfoCacheData>(json, JsonOptions);
 
-                if (!ValidateCacheData(cache))
+                if (!ValidateCacheData(cache, strmPath))
                     return false;
 
                 mediaStreams = cache.MediaStreams;
@@ -164,34 +196,7 @@ namespace StrmTool
         }
 
         /// <summary>
-        /// 检查并读取缓存（异步版本）
-        /// </summary>
-        public async Task<(bool success, List<MediaStream> mediaStreams)> TryGetCachedMediaStreamsAsync(string strmPath, CancellationToken cancellationToken = default)
-        {
-            var (valid, cachePath) = ValidateCachePath(strmPath);
-            if (!valid)
-                return (false, null);
-
-            try
-            {
-                var json = await File.ReadAllTextAsync(cachePath, cancellationToken).ConfigureAwait(false);
-                var cache = JsonSerializer.Deserialize<MediaInfoCacheData>(json, JsonOptions);
-
-                if (!ValidateCacheData(cache))
-                    return (false, null);
-
-                _logger.LogDebug("Loaded cached media streams from {Path}", cachePath);
-                return (true, cache.MediaStreams);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error reading cache from {Path}", strmPath);
-                return (false, null);
-            }
-        }
-
-        /// <summary>
-        /// 原子写入文件的私有方法
+        /// 保存完整媒体信息缓存（包含Size等元数据）
         /// </summary>
         private async Task WriteFileAtomicallyAsync(string filePath, string content, CancellationToken cancellationToken)
         {
@@ -257,36 +262,6 @@ namespace StrmTool
         }
 
         /// <summary>
-        /// 保存缓存（原子写入，先写临时文件再重命名）
-        /// </summary>
-        public async Task SaveCacheAsync(string strmPath, IEnumerable<MediaStream> mediaStreams, CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                var (valid, cachePath) = ValidateSaveCache(strmPath);
-                if (!valid)
-                    return;
-
-                var cache = new MediaInfoCacheData
-                {
-                    Version = "1.0",
-                    Timestamp = DateTime.UtcNow,
-                    MediaStreams = mediaStreams.ToList(),
-                    IsValid = true
-                };
-
-                var json = JsonSerializer.Serialize(cache, JsonOptions);
-                await WriteFileAtomicallyAsync(cachePath, json, cancellationToken).ConfigureAwait(false);
-
-                _logger.LogDebug("Saved cache to {Path}", cachePath);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error saving cache to {Path}", strmPath);
-            }
-        }
-
-        /// <summary>
         /// 保存完整媒体信息缓存（包含Size等元数据）
         /// </summary>
         public async Task SaveFullCacheAsync(
@@ -295,6 +270,7 @@ namespace StrmTool
             long size,
             long? runTimeTicks,
             string container,
+            string expectedStrmContentHash = null,
             CancellationToken cancellationToken = default)
         {
             try
@@ -303,11 +279,26 @@ namespace StrmTool
                 if (!valid)
                     return;
 
+                var strmContentHash = GetStrmContentHash(strmPath);
+                if (strmContentHash == null)
+                {
+                    _logger.LogWarning("STRM file unreadable; skipping cache save for {Path}", strmPath);
+                    return;
+                }
+
+                if (expectedStrmContentHash != null &&
+                    !string.Equals(expectedStrmContentHash, strmContentHash, StringComparison.Ordinal))
+                {
+                    _logger.LogWarning("STRM content changed during probing; skipping cache save for {Path}", strmPath);
+                    return;
+                }
+
                 var cache = new MediaInfoCacheData
                 {
                     Version = "1.0",
                     Timestamp = DateTime.UtcNow,
                     MediaStreams = mediaStreams?.ToList() ?? new List<MediaStream>(),
+                    StrmContentHash = strmContentHash,
                     IsValid = true,
                     Size = size,
                     RunTimeTicks = runTimeTicks,
@@ -341,7 +332,7 @@ namespace StrmTool
                 var json = File.ReadAllText(cachePath);
                 var cache = JsonSerializer.Deserialize<MediaInfoCacheData>(json, JsonOptions);
 
-                if (!ValidateCacheData(cache, requireMediaStreams: false))
+                if (!ValidateCacheData(cache, strmPath, requireMediaStreams: false))
                     return false;
 
                 cacheData = cache;
@@ -355,95 +346,6 @@ namespace StrmTool
             }
         }
 
-        /// <summary>
-        /// 清除缓存
-        /// </summary>
-        public void ClearCache(string strmPath)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(strmPath))
-                {
-                    _logger.LogDebug("Invalid strm path for cache clear");
-                    return;
-                }
-
-                var cachePath = GetCachePath(strmPath);
-                if (string.IsNullOrWhiteSpace(cachePath))
-                {
-                    _logger.LogDebug("Failed to get cache path for: {Path}", strmPath);
-                    return;
-                }
-
-                if (File.Exists(cachePath))
-                {
-                    File.Delete(cachePath);
-                    _logger.LogInformation("Cleared cache: {Path}", cachePath);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error clearing cache: {Path}", strmPath);
-            }
-        }
-
-        /// <summary>
-        /// 清除目录下所有缓存
-        /// </summary>
-        public void ClearAllCaches(string directoryPath)
-        {
-            try
-            {
-                if (!Directory.Exists(directoryPath))
-                    return;
-
-                var jsonFiles = Directory.GetFiles(directoryPath, "*" + CacheFileSuffix, SearchOption.AllDirectories);
-                int cleared = 0;
-
-                foreach (var jsonFile in jsonFiles)
-                {
-                    var fileName = Path.GetFileName(jsonFile);
-                    if (string.IsNullOrWhiteSpace(fileName) || !fileName.EndsWith(CacheFileSuffix, StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    // 从缓存文件名反推出 strm 文件名
-                    var baseName = Path.GetFileNameWithoutExtension(fileName);
-                    var strmPath = Path.Combine(Path.GetDirectoryName(jsonFile) ?? string.Empty, baseName + StrmMediaInfoService.StrmFileExtension);
-
-                    // 使用 GetCachePath 验证路径安全性
-                    var expectedCachePath = GetCachePath(strmPath);
-                    if (expectedCachePath == null)
-                    {
-                        continue;
-                    }
-
-                    // 确保找到的 json 文件确实是对应的缓存文件
-                    if (!string.Equals(expectedCachePath, jsonFile, StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    // 安全删除缓存文件
-                    try
-                    {
-                        File.Delete(jsonFile);
-                        cleared++;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Error deleting cache file {Path}", jsonFile);
-                    }
-                }
-
-                _logger.LogInformation("Cleared {Count} cache files in {Dir}", cleared, directoryPath);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error clearing caches in {Dir}", directoryPath);
-            }
-        }
     }
 
     /// <summary>
@@ -459,6 +361,9 @@ namespace StrmTool
 
         [JsonPropertyName("mediaStreams")]
         public List<MediaStream> MediaStreams { get; set; }
+
+        [JsonPropertyName("strmContentHash")]
+        public string StrmContentHash { get; set; }
 
         [JsonPropertyName("isValid")]
         public bool IsValid { get; set; }
