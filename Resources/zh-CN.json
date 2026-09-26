@@ -15,6 +15,8 @@
   "StrmTool.DescEnableAutoExtract": "启用后，新增的 strm 文件会自动在后台执行媒体信息提取，无需手动运行计划任务",
   "StrmTool.LblEnableMediaInfoCache": "启用媒体信息本地缓存",
   "StrmTool.DescEnableMediaInfoCache": "提取的媒体信息将缓存为同目录下 .strmtool.json 文件，下次探测秒级复用，极大降低远程探测开销",
+  "StrmTool.LblVerifyStrmContentHash": "校验 STRM 内容指纹",
+  "StrmTool.DescVerifyStrmContentHash": "启用时，链接变化会使旧缓存失效并重新探测。仅在路径迁移且确认媒体未变时关闭；读取不会改写缓存指纹，重新启用后缺失或不匹配的指纹仍会导致缓存失效。",
   "StrmTool.LblRefreshDelay": "提取延迟间隔",
   "StrmTool.DescRefreshDelay": "每次完成单项探测后等待的毫秒数，平滑请求节奏，防止对网盘或上游服务造成高频突发压力",
   "StrmTool.BtnSave": "保存设置",

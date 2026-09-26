@@ -44,6 +44,7 @@ namespace StrmTool
                 _logger.LogInformation("Plugin configuration:");
                 _logger.LogInformation("  EnableAutoExtract: {Value}", config.EnableAutoExtract);
                 _logger.LogInformation("  EnableMediaInfoCache: {Value}", config.EnableMediaInfoCache);
+                _logger.LogInformation("  VerifyStrmContentHash: {Value}", config.VerifyStrmContentHash);
                 _logger.LogInformation("  RefreshDelayMs: {Value}", config.RefreshDelayMs);
                 _logger.LogInformation("  MaxConcurrentExtract: {Value}", config.MaxConcurrentExtract);
                 _logger.LogInformation("  ForceRefreshIgnoreExisting: {Value}", config.ForceRefreshIgnoreExisting);

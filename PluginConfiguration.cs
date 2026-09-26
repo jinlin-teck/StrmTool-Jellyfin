@@ -29,6 +29,14 @@ namespace StrmTool
         public bool EnableMediaInfoCache { get; set; } = true;
 
         /// <summary>
+        /// 校验 STRM 内容指纹（SHA256）
+        /// 启用时：当 strm 内容或 URL 变动时旧缓存自动失效并重新探测
+        /// 关闭时：跳过读取时的指纹校验，仅适用于路径迁移且确认媒体未变的场景
+        /// 读取不会改写缓存指纹；重新启用后，指纹缺失或不匹配的缓存仍会失效
+        /// </summary>
+        public bool VerifyStrmContentHash { get; set; } = true;
+
+        /// <summary>
         /// 提取任务的最大并发数（范围：1-50）
         /// </summary>
         public int MaxConcurrentExtract

@@ -660,6 +660,18 @@
                     <span class="strmtool-switch-slider"></span>
                 </div>
             </label>
+
+            <!-- 校验 STRM 内容指纹开关 -->
+            <label class="strmtool-setting-row" for="chkVerifyStrmContentHash">
+                <div class="strmtool-setting-info">
+                    <span class="strmtool-setting-label" id="lblVerifyStrmContentHash">Verify STRM content fingerprint</span>
+                    <span class="strmtool-setting-desc" id="descVerifyStrmContentHash">Enabled: URL changes invalidate the cache and trigger re-probing. Disable only when media is unchanged after a path move. Cache reads never update fingerprints; re-enabling rejects missing or mismatched fingerprints.</span>
+                </div>
+                <div class="strmtool-switch">
+                    <input type="checkbox" id="chkVerifyStrmContentHash" />
+                    <span class="strmtool-switch-slider"></span>
+                </div>
+            </label>
         </section>
 
         <!-- 卡片 2: 性能与并发参数 -->
@@ -823,6 +835,8 @@
                 'StrmTool.DescEnableAutoExtract': 'When enabled, new strm files will automatically extract media info in the background without manual task execution',
                 'StrmTool.LblEnableMediaInfoCache': 'Enable media info caching',
                 'StrmTool.DescEnableMediaInfoCache': 'When enabled, extracted media info will be saved to xxx.strmtool.json files to avoid repeated probing',
+                'StrmTool.LblVerifyStrmContentHash': 'Verify STRM content fingerprint',
+                'StrmTool.DescVerifyStrmContentHash': 'Enabled: URL changes invalidate the cache and trigger re-probing. Disable only when media is unchanged after a path move. Cache reads never update fingerprints; re-enabling rejects missing or mismatched fingerprints.',
                 'StrmTool.LblRefreshDelay': 'Refresh delay',
                 'StrmTool.DescRefreshDelay': 'Milliseconds to wait after each media info refresh to avoid overwhelming remote servers',
                 'StrmTool.LblMaxConcurrentExtract': 'Maximum concurrent extractions',
@@ -856,6 +870,8 @@
                 'StrmTool.DescEnableAutoExtract': '启用后，新增的 strm 文件会自动在后台执行媒体信息提取，无需手动运行计划任务',
                 'StrmTool.LblEnableMediaInfoCache': '启用媒体信息本地缓存',
                 'StrmTool.DescEnableMediaInfoCache': '提取的媒体信息将缓存为同目录下 .strmtool.json 文件，下次探测秒级复用，极大降低远程探测开销',
+                'StrmTool.LblVerifyStrmContentHash': '校验 STRM 内容指纹',
+                'StrmTool.DescVerifyStrmContentHash': '启用时，链接变化会使旧缓存失效并重新探测。仅在路径迁移且确认媒体未变时关闭；读取不会改写缓存指纹，重新启用后缺失或不匹配的指纹仍会导致缓存失效。',
                 'StrmTool.LblRefreshDelay': '提取延迟间隔',
                 'StrmTool.DescRefreshDelay': '每次完成单项探测后等待的毫秒数，平滑请求节奏，防止对网盘或上游服务造成高频突发压力',
                 'StrmTool.LblMaxConcurrentExtract': '最大并发提取数',
@@ -939,6 +955,8 @@
                 ['descEnableAutoExtract', 'StrmTool.DescEnableAutoExtract'],
                 ['lblEnableMediaInfoCache', 'StrmTool.LblEnableMediaInfoCache'],
                 ['descEnableMediaInfoCache', 'StrmTool.DescEnableMediaInfoCache'],
+                ['lblVerifyStrmContentHash', 'StrmTool.LblVerifyStrmContentHash'],
+                ['descVerifyStrmContentHash', 'StrmTool.DescVerifyStrmContentHash'],
                 ['lblRefreshDelay', 'StrmTool.LblRefreshDelay'],
                 ['descRefreshDelay', 'StrmTool.DescRefreshDelay'],
                 ['lblMaxConcurrentExtract', 'StrmTool.LblMaxConcurrentExtract'],
@@ -992,6 +1010,7 @@
                 if (!config) return;
                 const chkAuto = getElement('chkEnableAutoExtract');
                 const chkCache = getElement('chkEnableMediaInfoCache');
+                const chkVerifyHash = getElement('chkVerifyStrmContentHash');
                 const txtDelay = getElement('txtRefreshDelay');
                 const chkIgnoreExisting = getElement('chkForceRefreshIgnoreExisting');
                 const chkIgnoreCache = getElement('chkForceRefreshIgnoreCache');
@@ -999,6 +1018,7 @@
 
                 if (chkAuto) chkAuto.checked = config.EnableAutoExtract !== false;
                 if (chkCache) chkCache.checked = config.EnableMediaInfoCache !== false;
+                if (chkVerifyHash) chkVerifyHash.checked = config.VerifyStrmContentHash !== false;
                 if (txtDelay) txtDelay.value = config.RefreshDelayMs ?? 1000;
                 
                 const concurrentVal = config.MaxConcurrentExtract ?? 5;
@@ -1017,6 +1037,7 @@
         function resetDefaults() {
             const chkAuto = getElement('chkEnableAutoExtract');
             const chkCache = getElement('chkEnableMediaInfoCache');
+            const chkVerifyHash = getElement('chkVerifyStrmContentHash');
             const txtDelay = getElement('txtRefreshDelay');
             const chkIgnoreExisting = getElement('chkForceRefreshIgnoreExisting');
             const chkIgnoreCache = getElement('chkForceRefreshIgnoreCache');
@@ -1024,6 +1045,7 @@
 
             if (chkAuto) chkAuto.checked = true;
             if (chkCache) chkCache.checked = true;
+            if (chkVerifyHash) chkVerifyHash.checked = true;
             if (txtDelay) txtDelay.value = 1000;
             if (txtConcurrent) txtConcurrent.value = 5;
             if (rngConcurrent) rngConcurrent.value = 5;
@@ -1042,6 +1064,7 @@
             const txtTimeout = getElement('txtMetadataRestoreTimeout');
             const chkAuto = getElement('chkEnableAutoExtract');
             const chkCache = getElement('chkEnableMediaInfoCache');
+            const chkVerifyHash = getElement('chkVerifyStrmContentHash');
             const chkIgnoreExisting = getElement('chkForceRefreshIgnoreExisting');
             const chkIgnoreCache = getElement('chkForceRefreshIgnoreCache');
 
@@ -1061,6 +1084,7 @@
             var config = {
                 EnableAutoExtract: chkAuto ? chkAuto.checked : true,
                 EnableMediaInfoCache: chkCache ? chkCache.checked : true,
+                VerifyStrmContentHash: chkVerifyHash ? chkVerifyHash.checked : true,
                 RefreshDelayMs: refreshDelay,
                 MaxConcurrentExtract: maxConcurrent,
                 ForceRefreshIgnoreExisting: chkIgnoreExisting ? chkIgnoreExisting.checked : false,

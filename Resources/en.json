@@ -15,6 +15,8 @@
   "StrmTool.DescEnableAutoExtract": "When enabled, newly added strm files will automatically extract media info in the background without manual task execution",
   "StrmTool.LblEnableMediaInfoCache": "Enable media info caching",
   "StrmTool.DescEnableMediaInfoCache": "Extracted media info will be cached as .strmtool.json alongside the file, enabling instant reuse and minimizing remote probing",
+  "StrmTool.LblVerifyStrmContentHash": "Verify STRM content fingerprint",
+  "StrmTool.DescVerifyStrmContentHash": "Enabled: URL changes invalidate the cache and trigger re-probing. Disable only when media is unchanged after a path move. Cache reads never update fingerprints; re-enabling rejects missing or mismatched fingerprints.",
   "StrmTool.LblRefreshDelay": "Extraction delay interval",
   "StrmTool.DescRefreshDelay": "Milliseconds to wait after each media info refresh to smooth traffic and prevent overwhelming remote servers",
   "StrmTool.BtnSave": "Save Settings",

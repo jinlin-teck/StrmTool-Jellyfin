@@ -124,13 +124,20 @@ namespace StrmTool
         /// <summary>
         /// 验证缓存数据是否有效
         /// </summary>
-        private bool ValidateCacheData(MediaInfoCacheData cache, string strmPath, bool requireMediaStreams = true)
+        private bool ValidateCacheData(MediaInfoCacheData cache, string strmPath, bool requireMediaStreams = true, bool? verifyContentHash = null)
         {
             if (cache?.IsValid != true)
                 return false;
             
             if (requireMediaStreams && cache.MediaStreams == null)
                 return false;
+
+            bool shouldVerify = verifyContentHash ?? (Plugin.Instance?.Configuration?.VerifyStrmContentHash ?? true);
+            if (!shouldVerify)
+            {
+                // 仅跳过读取时的校验，不迁移或回写指纹；重新启用后仍使用原指纹判断有效性。
+                return true;
+            }
 
             // 旧缓存没有内容指纹，无法判断 STRM 是否已更换媒体源。
             // STRM 文件暂不可读（哈希为 null）时同样判为无效，触发重探测而非使用过期缓存。
@@ -168,7 +175,7 @@ namespace StrmTool
         /// <summary>
         /// 检查并读取缓存（同步版本，保持兼容性）
         /// </summary>
-        public bool TryGetCachedMediaStreams(string strmPath, out List<MediaStream> mediaStreams)
+        public bool TryGetCachedMediaStreams(string strmPath, out List<MediaStream> mediaStreams, bool? verifyContentHash = null)
         {
             mediaStreams = null;
 
@@ -181,7 +188,7 @@ namespace StrmTool
                 var json = File.ReadAllText(cachePath);
                 var cache = JsonSerializer.Deserialize<MediaInfoCacheData>(json, JsonOptions);
 
-                if (!ValidateCacheData(cache, strmPath))
+                if (!ValidateCacheData(cache, strmPath, verifyContentHash: verifyContentHash))
                     return false;
 
                 mediaStreams = cache.MediaStreams;
@@ -319,7 +326,7 @@ namespace StrmTool
         /// <summary>
         /// 尝试读取完整缓存数据（包含元数据）
         /// </summary>
-        public bool TryGetFullCache(string strmPath, out MediaInfoCacheData cacheData)
+        public bool TryGetFullCache(string strmPath, out MediaInfoCacheData cacheData, bool? verifyContentHash = null)
         {
             cacheData = null;
 
@@ -332,7 +339,7 @@ namespace StrmTool
                 var json = File.ReadAllText(cachePath);
                 var cache = JsonSerializer.Deserialize<MediaInfoCacheData>(json, JsonOptions);
 
-                if (!ValidateCacheData(cache, strmPath, requireMediaStreams: false))
+                if (!ValidateCacheData(cache, strmPath, requireMediaStreams: false, verifyContentHash: verifyContentHash))
                     return false;
 
                 cacheData = cache;

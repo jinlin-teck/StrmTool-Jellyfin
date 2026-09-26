@@ -15,6 +15,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
     <EmbeddedResource Include="Configuration\configPage.html" />
     <EmbeddedResource Include="Resources\*.json" />
     <EmbeddedResource Include="thumb.png" />
