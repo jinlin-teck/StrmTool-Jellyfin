@@ -14,7 +14,7 @@ Jellyfin 插件，用于从 strm 文件中提取媒体技术信息（codec、分
 4. **计划任务支持**：提供提取、导出缓存和从缓存恢复三个计划任务，支持手动触发和定时执行
 5. **配置界面**：提供插件设置页面，可调整自动提取开关、刷新延迟时间、持久化缓存开关和最大并发数以及强制刷新策略
 
-适配 Jellyfin 10.11.0+（最新的 12.1.0 已测试通过，其他版本请自行测试）
+本版本面向 Jellyfin 12.1.0，使用 .NET 10 构建；不声明兼容 Jellyfin 10.11.x 或其他版本。
 
 ## 安装方法
 
@@ -74,7 +74,7 @@ Jellyfin plugin for extracting media technical information (codec, resolution, s
 4. **Scheduled Task Support**: Provides extraction, cache export, and cache restoration tasks with manual or scheduled execution
 5. **Configuration Interface**: Provides a plugin settings page to adjust automatic extraction toggle, refresh delay, persistent cache toggle, maximum concurrency, and force refresh strategies
 
-Compatible with Jellyfin 10.11.0+ (latest 12.1.0 tested, other versions please test yourself)
+This version targets Jellyfin 12.1.0 and is built with .NET 10. Compatibility with Jellyfin 10.11.x or other versions is not claimed.
 
 ## Installation
 

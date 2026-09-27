@@ -694,7 +694,7 @@
                         <label class="strmtool-field-label" for="txtRefreshDelay" id="lblRefreshDelay">Refresh delay</label>
                     </div>
                     <div class="strmtool-input-wrap">
-                        <input type="number" class="strmtool-input-number" id="txtRefreshDelay" min="0" step="100" />
+                        <input type="number" class="strmtool-input-number" id="txtRefreshDelay" min="0" max="20000" step="100" />
                         <span class="strmtool-input-suffix" id="unitMs">ms</span>
                     </div>
                     <p class="strmtool-field-desc" id="descRefreshDelay">
@@ -783,6 +783,9 @@
             </label>
         </section>
 
+        <p id="configLoadError" role="alert" hidden></p>
+        <button type="button" class="strmtool-btn-secondary" id="btnRetryLoad" hidden>Retry loading</button>
+
         <!-- 底部操作栏 -->
         <footer class="strmtool-action-bar">
             <div class="strmtool-action-tips">
@@ -798,7 +801,7 @@
                     </svg>
                     <span id="btnResetDefaultsText">Reset Defaults</span>
                 </button>
-                <button type="button" class="strmtool-btn-primary" id="btnSave">
+                <button type="button" class="strmtool-btn-primary" id="btnSave" disabled>
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" id="iconSave">
                         <path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/>
                     </svg>
@@ -853,6 +856,9 @@
                 'StrmTool.SettingsSaved': 'Settings saved successfully',
                 'StrmTool.ResetSuccess': 'Restored default settings. Click Save to apply.',
                 'StrmTool.Saving': 'Saving...',
+                'StrmTool.LoadFailed': 'Unable to load settings. Retry before saving.',
+                'StrmTool.RetryLoad': 'Retry loading',
+                'StrmTool.SaveFailed': 'Failed to save settings',
                 'StrmTool.UnitMs': 'ms',
                 'StrmTool.UnitMinutes': 'min'
             },
@@ -888,13 +894,37 @@
                 'StrmTool.SettingsSaved': '设置已成功保存',
                 'StrmTool.ResetSuccess': '已恢复默认设置，点击保存后生效',
                 'StrmTool.Saving': '正在保存...',
+                'StrmTool.LoadFailed': '无法加载设置，请重试后再保存。',
+                'StrmTool.RetryLoad': '重新加载',
+                'StrmTool.SaveFailed': '保存设置失败',
                 'StrmTool.UnitMs': '毫秒',
                 'StrmTool.UnitMinutes': '分钟'
             }
         };
 
         // 作用域选择器
-        const getElement = (id) => document.querySelector('#' + id);
+        const pageRoot = document.querySelector('#configPage');
+        const getElement = (id) => id === 'configPage' ? pageRoot : pageRoot.querySelector('#' + id);
+        let configLoaded = false;
+        let configDirty = false;
+        let saving = false;
+        let editRevision = 0;
+        let loadRequestId = 0;
+
+        function markDirty() {
+            if (!configLoaded) return;
+            configDirty = true;
+            editRevision++;
+        }
+
+        function setLoadError(failed) {
+            getElement('configLoadError').hidden = !failed;
+            getElement('configLoadError').textContent = failed ? t('StrmTool.LoadFailed') : '';
+            getElement('btnRetryLoad').hidden = !failed;
+            getElement('btnSave').disabled = !configLoaded || saving;
+            getElement('btnResetDefaults').disabled = !configLoaded || saving;
+            pageRoot.querySelectorAll('input').forEach(input => { input.disabled = !configLoaded; });
+        }
 
         // 获取当前语言
         function getCurrentCulture() {
@@ -970,6 +1000,7 @@
                 ['lblForceRefreshIgnoreCache', 'StrmTool.LblForceRefreshIgnoreCache'],
                 ['descForceRefreshIgnoreCache', 'StrmTool.DescForceRefreshIgnoreCache'],
                 ['btnSaveText', 'StrmTool.BtnSave'],
+                ['btnRetryLoad', 'StrmTool.RetryLoad'],
                 ['btnResetDefaultsText', 'StrmTool.BtnResetDefaults'],
                 ['badgeRestart', 'StrmTool.BadgeRestartRequired'],
                 ['badgeCaution', 'StrmTool.BadgeWarning'],
@@ -1002,12 +1033,18 @@
 
         // 加载配置
         function loadConfig() {
+            if (configDirty || saving) return;
+            const requestId = ++loadRequestId;
+            const revision = editRevision;
             if (typeof ApiClient === 'undefined' || !ApiClient.getPluginConfiguration) {
+                configLoaded = false;
+                setLoadError(true);
                 return;
             }
 
             ApiClient.getPluginConfiguration('6107fc8c-883a-4171-b70e-7590658706B9').then(function(config) {
-                if (!config) return;
+                if (requestId !== loadRequestId || revision !== editRevision || saving) return;
+                if (!config) throw new Error('Empty plugin configuration');
                 const chkAuto = getElement('chkEnableAutoExtract');
                 const chkCache = getElement('chkEnableMediaInfoCache');
                 const chkVerifyHash = getElement('chkVerifyStrmContentHash');
@@ -1028,13 +1065,19 @@
                 if (chkIgnoreExisting) chkIgnoreExisting.checked = config.ForceRefreshIgnoreExisting === true;
                 if (chkIgnoreCache) chkIgnoreCache.checked = config.ForceRefreshIgnoreCache === true;
                 if (txtTimeout) txtTimeout.value = config.MetadataRestoreTimeoutMinutes ?? 5;
+                configLoaded = true;
+                setLoadError(false);
             }).catch(function() {
-                // 静默处理或保持原配置
+                if (requestId !== loadRequestId || revision !== editRevision || saving) return;
+                configLoaded = false;
+                setLoadError(true);
             });
         }
 
         // 恢复默认配置
         function resetDefaults() {
+            if (!configLoaded || saving) return;
+            markDirty();
             const chkAuto = getElement('chkEnableAutoExtract');
             const chkCache = getElement('chkEnableMediaInfoCache');
             const chkVerifyHash = getElement('chkVerifyStrmContentHash');
@@ -1058,6 +1101,15 @@
 
         // 保存配置
         function saveConfig() {
+            if (!configLoaded || saving) return;
+            if (typeof ApiClient === 'undefined' || !ApiClient.updatePluginConfiguration) {
+                showToast(t('StrmTool.SaveFailed'));
+                return;
+            }
+            saving = true;
+            ++loadRequestId;
+            const savedRevision = editRevision;
+            getElement('btnSave').disabled = true;
             const btnSave = getElement('btnSave');
             const btnSaveText = getElement('btnSaveText');
             const txtDelay = getElement('txtRefreshDelay');
@@ -1072,7 +1124,7 @@
             const maxConcurrentInput = parseInt(txtConcurrent ? txtConcurrent.value : '5', 10);
             const metadataRestoreTimeoutInput = parseInt(txtTimeout ? txtTimeout.value : '5', 10);
 
-            const refreshDelay = Math.max(0, Number.isNaN(refreshDelayInput) ? 1000 : refreshDelayInput);
+            const refreshDelay = Math.min(20000, Math.max(0, Number.isNaN(refreshDelayInput) ? 1000 : refreshDelayInput));
             const maxConcurrent = Math.min(50, Math.max(1, Number.isNaN(maxConcurrentInput) ? 5 : maxConcurrentInput));
             const metadataRestoreTimeout = Math.min(30, Math.max(1, Number.isNaN(metadataRestoreTimeoutInput) ? 5 : metadataRestoreTimeoutInput));
 
@@ -1100,6 +1152,7 @@
 
             if (typeof ApiClient !== 'undefined' && ApiClient.updatePluginConfiguration) {
                 ApiClient.updatePluginConfiguration('6107fc8c-883a-4171-b70e-7590658706B9', config).then(function() {
+                    configDirty = editRevision !== savedRevision;
                     if (btnSave && btnSaveText) {
                         btnSave.classList.remove('loading');
                         btnSave.classList.add('success');
@@ -1121,25 +1174,19 @@
                         btnSave.classList.remove('loading');
                         btnSaveText.textContent = t('StrmTool.BtnSave');
                     }
-                    showToast('Failed to save settings');
+                    showToast(t('StrmTool.SaveFailed'));
+                }).finally(function() {
+                    saving = false;
+                    getElement('btnSave').disabled = !configLoaded;
                 });
-            } else {
-                // 本地或预览环境兜底
-                setTimeout(function() {
-                    if (btnSave && btnSaveText) {
-                        btnSave.classList.remove('loading');
-                        btnSave.classList.add('success');
-                        btnSaveText.textContent = t('StrmTool.SettingsSaved');
-
-                        setTimeout(() => {
-                            btnSave.classList.remove('success');
-                            btnSaveText.textContent = t('StrmTool.BtnSave');
-                        }, 2000);
-                    }
-                    showToast(t('StrmTool.SettingsSaved'));
-                }, 400);
             }
         }
+
+        pageRoot.querySelectorAll('input').forEach(input => {
+            input.addEventListener('input', markDirty);
+            input.addEventListener('change', markDirty);
+        });
+        getElement('btnRetryLoad').addEventListener('click', loadConfig);
 
         // 绑定按钮事件
         const btnSaveElem = getElement('btnSave');
@@ -1164,6 +1211,7 @@
             pageElement.addEventListener('pageshow', initializePage);
         }
 
+        setLoadError(false);
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', initializePage);
         } else {

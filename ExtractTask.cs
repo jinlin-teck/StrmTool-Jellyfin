@@ -117,6 +117,7 @@ namespace StrmTool
             int processed = 0;
             int succeeded = 0;
             int total = items.Count;
+            var progressLock = new object();
 
             int nextIndex = -1;
             async Task WorkerAsync()
@@ -152,8 +153,11 @@ namespace StrmTool
                     finally
                     {
                         _semaphore.Release();
-                        int current = Interlocked.Increment(ref processed);
-                        progress.Report(Math.Min((double)current / total * 100, 100));
+                        lock (progressLock)
+                        {
+                            processed++;
+                            progress.Report(Math.Min((double)processed / total * 100, 100));
+                        }
                     }
                 }
             }
@@ -171,7 +175,7 @@ namespace StrmTool
         /// <param name="item">库条目</param>
         /// <param name="cancellationToken">取消令牌</param>
         /// <returns>是否成功从缓存加载</returns>
-        private bool TryLoadFromCache(BaseItem item, CancellationToken cancellationToken)
+        private async Task<bool> TryLoadFromCacheAsync(BaseItem item, CancellationToken cancellationToken)
         {
             if (!_config.EnableMediaInfoCache || _config.ForceRefreshIgnoreCache)
             {
@@ -185,10 +189,14 @@ namespace StrmTool
 
             try
             {
-                _mediaInfoService.SaveMediaStreams(item.Id, cachedStreams, cancellationToken);
+                await _mediaInfoService.SaveMediaStreamsAsync(item, cachedStreams, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("{Name}: Used cached media info ({Count} streams)",
                     item.Name, cachedStreams.Count);
                 return true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -431,7 +439,7 @@ namespace StrmTool
             _logger.LogDebug("{Prefix} - Before: {Count} streams", logPrefix, beforeStreams.Count);
 
             // 首先尝试从缓存加载
-            bool loadedFromCache = TryLoadFromCache(item, cancellationToken);
+            bool loadedFromCache = await TryLoadFromCacheAsync(item, cancellationToken).ConfigureAwait(false);
 
             if (!loadedFromCache)
             {
@@ -439,9 +447,9 @@ namespace StrmTool
                 await ProbeAndCacheAsync(item, cancellationToken).ConfigureAwait(false);
             }
 
-            // SaveMediaStreams 不会触发 ItemUpdated 事件，Size 等元数据必须在此就地回写，
-            // 否则界面上的大小会一直停留在 strm 物理文件大小，直到播放或其他更新事件才被监听器恢复
-            await RestoreMetadataFromCacheAsync(item, logPrefix, cancellationToken).ConfigureAwait(false);
+            // 新探测结果已直接持久化；仅缓存命中时补回缺失元数据。
+            if (loadedFromCache)
+                await RestoreMetadataFromCacheAsync(item, logPrefix, cancellationToken).ConfigureAwait(false);
 
             cancellationToken.ThrowIfCancellationRequested();
             var afterStreams = _mediaInfoService.GetItemMediaStreams(item);
@@ -449,7 +457,7 @@ namespace StrmTool
         }
 
         /// <summary>
-        /// 探测/缓存命中后立即从缓存回写 Size 等元数据并持久化。
+        /// 缓存命中后从缓存回写仍缺失的 Size 等元数据并持久化。
         /// 与 ItemUpdateListener 的恢复逻辑一致：仅在字段缺失或被重置时修改，
         /// UpdateToRepositoryAsync 触发的 ItemUpdated 事件会被监听器判定为无需恢复，不会循环。
         /// </summary>

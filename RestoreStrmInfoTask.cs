@@ -106,7 +106,7 @@ namespace StrmTool
 
             if (!hasVideo && !hasAudio && cacheData.MediaStreams != null && cacheData.MediaStreams.Count > 0)
             {
-                service.SaveMediaStreams(item.Id, cacheData.MediaStreams, cancellationToken);
+                await service.SaveMediaStreamsAsync(item, cacheData.MediaStreams, cancellationToken).ConfigureAwait(false);
                 changed = true;
                 Logger.LogInformation("{Name}: media streams restored from cache ({Count} streams)",
                     item.Name, cacheData.MediaStreams.Count);

@@ -82,15 +82,20 @@ namespace StrmTool
                 return true;
             }
 
-            // 检查基本的路径遍历模式
-            var normalized = path.Replace('/', '\\');
-            if (normalized.Contains(@"..\\") || normalized.Contains(@"\\..") || 
-                normalized.StartsWith(@"..") || normalized.EndsWith(@".."))
+            // URL 只检查原始路径，避免查询参数误报；不能使用 Uri.AbsolutePath，
+            // 因为 Uri 会先消除 ../，使检查丢失原始路径段。
+            var schemeEnd = path.IndexOf("://", StringComparison.Ordinal);
+            if (schemeEnd > 0 && Uri.CheckSchemeName(path.Substring(0, schemeEnd)))
             {
-                return true;
+                var suffixStart = path.IndexOfAny(new[] { '?', '#' }, schemeEnd + 3);
+                if (suffixStart >= 0)
+                    path = path.Substring(0, suffixStart);
+
+                var pathStart = path.IndexOfAny(new[] { '/', '\\' }, schemeEnd + 3);
+                path = pathStart >= 0 ? Uri.UnescapeDataString(path.Substring(pathStart)) : string.Empty;
             }
 
-            return false;
+            return path.Contains('\0') || path.Split(new[] { '/', '\\' }).Any(segment => segment == "..");
         }
 
         /// <summary>

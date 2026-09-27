@@ -25,6 +25,33 @@ namespace StrmTool.Tests
             Directory.CreateDirectory(_directory);
         }
 
+        [Theory]
+        [InlineData("/media/../secret.mp4", true)]
+        [InlineData(@"C:\media\..\secret.mp4", true)]
+        [InlineData(@"\\server\share\..\secret.mp4", true)]
+        [InlineData("../movie.mp4", true)]
+        [InlineData("/media/..", true)]
+        [InlineData("..", true)]
+        [InlineData("/media/./movie.mp4", false)]
+        [InlineData("/media/movie..mp4", false)]
+        [InlineData("/media/..movie.mp4", false)]
+        [InlineData("/media/movie..", false)]
+        [InlineData("/media/movie\0.mp4", true)]
+        [InlineData("https://example.invalid/media/../secret.mp4", true)]
+        [InlineData("https://example.invalid/media/%2e%2e/secret.mp4", true)]
+        [InlineData("https://example.invalid/media%2f..%2fsecret.mp4", true)]
+        [InlineData("https://example.invalid/media/%00movie.mp4", true)]
+        [InlineData("https://example.invalid/movie.mp4?token=../value", false)]
+        [InlineData("https://example.invalid?token=/../value", false)]
+        [InlineData("https://example.invalid/movie.mp4#../fragment", false)]
+        [InlineData("/media/%2e%2e/movie.mp4", false)]
+        [InlineData("", false)]
+        [InlineData(null, false)]
+        public void TraversalValidationChecksPathSegmentsInsteadOfFilenameOrUrlParameters(string path, bool expected)
+        {
+            Assert.Equal(expected, MediaInfoCache.ContainsPathTraversal(path));
+        }
+
         [Fact]
         public void MissingConfigurationFieldDefaultsToStrictValidation()
         {

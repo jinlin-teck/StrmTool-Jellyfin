@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
@@ -89,6 +90,7 @@ namespace StrmTool
                     BaseItemKind.Movie,
                     BaseItemKind.Episode,
                     BaseItemKind.Video,
+                    BaseItemKind.MusicVideo,
                     BaseItemKind.Audio
                 }
             };
@@ -145,12 +147,61 @@ namespace StrmTool
         /// <summary>
         /// 保存库条目的媒体流信息
         /// </summary>
-        /// <param name="itemId">库条目ID</param>
+        /// <param name="item">库条目</param>
         /// <param name="mediaStreams">要保存的媒体流列表</param>
         /// <param name="cancellationToken">取消令牌</param>
-        public void SaveMediaStreams(Guid itemId, List<MediaStream> mediaStreams, CancellationToken cancellationToken)
+        public async Task<List<MediaStream>> SaveMediaStreamsAsync(
+            BaseItem item, List<MediaStream> mediaStreams, CancellationToken cancellationToken)
         {
-            _mediaStreamRepository.SaveMediaStreams(itemId, mediaStreams, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var streams = MergeExternalStreams(mediaStreams, GetItemMediaStreams(item));
+            _mediaStreamRepository.SaveMediaStreams(item.Id, streams, cancellationToken);
+            if (item is Video video)
+            {
+                video.DefaultVideoStreamIndex = streams.FirstOrDefault(s => s.Type == MediaStreamType.Video)?.Index;
+                video.HasSubtitles = streams.Any(s => s.Type == MediaStreamType.Subtitle);
+            }
+
+            await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
+            return streams;
+        }
+
+        // Repository writes replace the entire stream set. Keep discovered external streams,
+        // preferring the current library entry over an older cache entry for the same path.
+        // Clone first: assigning external indices must not mutate shared library/cache objects.
+        private static List<MediaStream> MergeExternalStreams(
+            IEnumerable<MediaStream> incoming, IEnumerable<MediaStream> existing)
+        {
+            var incomingList = incoming.ToList();
+            var external = existing.Where(s => s.IsExternal)
+                .Concat(incomingList.Where(s => s.IsExternal));
+            var selected = incomingList.Where(s => !s.IsExternal).ToList();
+            var seenPaths = new HashSet<(MediaStreamType, string)>();
+            foreach (var stream in external)
+            {
+                // Pathless streams cannot be safely deduplicated by filename.
+                var path = stream.Path;
+                if (path != null && OperatingSystem.IsWindows() && !path.Contains("://"))
+                    path = path.ToUpperInvariant();
+                if (path == null || seenPaths.Add((stream.Type, path)))
+                    selected.Add(stream);
+            }
+
+            var result = JsonSerializer.Deserialize<List<MediaStream>>(JsonSerializer.Serialize(selected));
+            int nextIndex = result.Where(s => !s.IsExternal).Select(s => s.Index).DefaultIfEmpty(-1).Max() + 1;
+            foreach (var stream in result.Where(s => s.IsExternal))
+                stream.Index = nextIndex++;
+            return result;
+        }
+
+        private static void ApplyProbeMetadata(BaseItem item, MediaProbeResult result)
+        {
+            item.Size = result.Size > 0 ? result.Size : null;
+            item.RunTimeTicks = result.RunTimeTicks;
+            item.Container = result.Container;
+            item.Width = result.Width;
+            item.Height = result.Height;
+            item.TotalBitrate = result.TotalBitrate > 0 ? result.TotalBitrate : null;
         }
 
         /// <summary>
@@ -205,10 +256,6 @@ namespace StrmTool
                         return result;
                     }
 
-                    // 保存媒体流信息（不保存 Item 元数据，避免与 Jellyfin 的元数据重置产生竞态条件）
-                    // Item 元数据会在 ItemUpdateListener 中从缓存恢复
-                    _mediaStreamRepository.SaveMediaStreams(item.Id, mediaInfo.MediaStreams, cancellationToken);
-
                     // 填充返回结果（包含需要的元数据，供缓存使用）
                     result.MediaStreams = mediaInfo.MediaStreams.ToList();
                     result.Size = mediaInfo.Size.GetValueOrDefault();
@@ -224,7 +271,11 @@ namespace StrmTool
                         result.Height = highestVideoStream.Height.GetValueOrDefault();
                     }
 
-                    _logger.LogDebug("Successfully saved {Count} media streams for {Name} (item metadata will be restored later via cache)",
+                    // A fresh probe is authoritative even when cache reads/writes are disabled.
+                    ApplyProbeMetadata(item, result);
+                    result.MediaStreams = await SaveMediaStreamsAsync(item, result.MediaStreams, cancellationToken).ConfigureAwait(false);
+
+                    _logger.LogDebug("Successfully saved {Count} media streams and metadata for {Name}",
                         mediaInfo.MediaStreams.Count, fileName);
                     return result;
                 }
@@ -240,7 +291,7 @@ namespace StrmTool
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error probing STRM content for {Name}", fileName);
-                return result;
+                return new MediaProbeResult();
             }
         }
 
