@@ -4,7 +4,7 @@
 
 **StrmTool** is a `.strm` media enhancement plugin built for Jellyfin. By pre-extracting technical media information (video codec, resolution, HDR, audio tracks, subtitles, etc.), persisting local caches, protecting metadata from being reset, and enabling direct playback for `.strm` audio files, it dramatically improves library presentation and playback startup speed for cloud and remote media streams.
 
-> **Current Version**: `v2.5.0` (Targets **Jellyfin 12.1.0** / .NET 10)
+> **Current Version**: `v2.5.0` (Targets **Jellyfin 12.1.0** / .NET 10; for Emby servers, see [StrmTool for Emby](https://github.com/jinlin-teck/StrmTool))
 >
 > **Recommended Companion**: Need to batch-generate `.strm` files from OpenList / Alist cloud drives? Check out my companion project [openlist-strm](https://github.com/jinlin-teck/openlist-strm) — a lightweight `.strm` generator service with WebUI that pairs seamlessly with this plugin.
 
@@ -41,9 +41,20 @@
 
 > ⚠️ **Compatibility**: Version `v2.5.0` is built specifically for **Jellyfin 12.1.0** (.NET 10). Compatibility with Jellyfin 10.11.x or earlier versions is not supported. Please choose the plugin build matching your Jellyfin server version.
 
-1. Create a `StrmTool` folder inside your Jellyfin `plugins` directory (e.g., `/config/plugins/StrmTool` in Docker).
-2. Copy `StrmTool.dll` into the `StrmTool` folder.
+### Method 1: Install via Jellyfin Plugin Repository (Recommended)
+
+1. Go to **Jellyfin Dashboard → Plugins → Repositories**, click Add, and enter the repository URL:
+   ```text
+   https://raw.githubusercontent.com/jinlin-teck/StrmTool-Jellyfin/main/manifest.json
+   ```
+2. Open the **Catalog**, find **StrmTool**, and click Install.
 3. Restart the Jellyfin server.
+
+### Method 2: Manual DLL Installation
+
+1. Download `StrmTool.dll` (or extract the `.zip` archive) from the [Releases](https://github.com/jinlin-teck/StrmTool-Jellyfin/releases) page.
+2. Create a `StrmTool` folder inside your Jellyfin `plugins` directory (e.g., `/config/plugins/StrmTool` in Docker).
+3. Copy `StrmTool.dll` into the `StrmTool` folder and restart the Jellyfin server.
 4. Go to **Dashboard → Plugins** and verify that `StrmTool` is active.
 
 ---

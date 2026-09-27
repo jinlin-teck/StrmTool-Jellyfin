@@ -1,0 +1,192 @@
+name: Build and Release Plugin
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v2.5.0)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, Release & Update Manifest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+          dotnet-quality: "ga"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run .NET regression tests
+        run: dotnet test tests/StrmTool.Tests/StrmTool.Tests.csproj -c Release
+
+      - name: Run config page tests
+        run: node --test tests/config-page.test.cjs
+
+      - name: Resolve version metadata
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          PATTERN='s:.*<AssemblyVersion>\(.*\)</AssemblyVersion>.*:\1:p'
+          CSPROJ_VER=$(sed -n "${PATTERN}" StrmTool.csproj | tr -d '[:space:]')
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+          elif [[ -n "${INPUT_TAG}" ]]; then
+            TAG_NAME="${INPUT_TAG}"
+          else
+            TAG_NAME="v${CSPROJ_VER}"
+          fi
+
+          RAW_VER="${TAG_NAME#v}"
+          DOT_COUNT=$(awk -F'.' '{print NF-1}' <<< "${RAW_VER}")
+          if [[ "${DOT_COUNT}" -eq 2 ]]; then
+            VERSION_4PART="${RAW_VER}.0"
+          elif [[ "${DOT_COUNT}" -eq 3 ]]; then
+            VERSION_4PART="${RAW_VER}"
+          else
+            echo "Unsupported version format: ${RAW_VER}" >&2
+            exit 1
+          fi
+
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          ZIP_NAME="StrmTool_${VERSION_4PART}.zip"
+          BASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download"
+          SOURCE_URL="${BASE_URL}/${TAG_NAME}/${ZIP_NAME}"
+
+          {
+            echo "tag_name=${TAG_NAME}"
+            echo "raw_ver=${RAW_VER}"
+            echo "version_4part=${VERSION_4PART}"
+            echo "timestamp=${TIMESTAMP}"
+            echo "zip_name=${ZIP_NAME}"
+            echo "source_url=${SOURCE_URL}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Publish plugin and package ZIP
+        id: package
+        env:
+          VERSION_4PART: ${{ steps.meta.outputs.version_4part }}
+          TIMESTAMP: ${{ steps.meta.outputs.timestamp }}
+          ZIP_NAME: ${{ steps.meta.outputs.zip_name }}
+        run: |
+          set -euo pipefail
+          dotnet publish StrmTool.csproj -c Release -o publish \
+            -p:AssemblyVersion="${VERSION_4PART}" \
+            -p:FileVersion="${VERSION_4PART}"
+
+          mkdir -p dist
+          cp publish/StrmTool.dll dist/StrmTool.dll
+          cp thumb.png dist/thumb.png
+
+          DESC=$(jq -r '.[0].description' manifest.json)
+          OVERVIEW=$(jq -r '.[0].overview' manifest.json)
+
+          jq -n \
+            --arg guid "6107fc8c-883a-4171-b70e-7590658706b9" \
+            --arg name "StrmTool" \
+            --arg description "${DESC}" \
+            --arg overview "${OVERVIEW}" \
+            --arg owner "${GITHUB_REPOSITORY_OWNER}" \
+            --arg category "General" \
+            --arg targetAbi "12.1.0.0" \
+            --arg version "${VERSION_4PART}" \
+            --arg timestamp "${TIMESTAMP}" \
+            '{
+              guid: $guid,
+              name: $name,
+              description: $description,
+              overview: $overview,
+              owner: $owner,
+              category: $category,
+              targetAbi: $targetAbi,
+              version: $version,
+              timestamp: $timestamp,
+              status: "Active",
+              autoUpdate: true,
+              assemblies: ["StrmTool.dll"]
+            }' > dist/meta.json
+
+          (
+            cd dist
+            zip -9 -r "../${ZIP_NAME}" StrmTool.dll meta.json thumb.png
+          )
+          CHECKSUM=$(md5sum "${ZIP_NAME}" | awk '{print $1}')
+          echo "checksum=${CHECKSUM}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag_name }}
+          ZIP: ${{ steps.meta.outputs.zip_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${ZIP}" "publish/StrmTool.dll" --clobber
+          else
+            gh release create "${TAG}" "${ZIP}" "publish/StrmTool.dll" \
+              --title "StrmTool ${TAG}" \
+              --generate-notes
+          fi
+
+      - name: Update manifest.json on main branch
+        env:
+          TAG: ${{ steps.meta.outputs.tag_name }}
+          VERSION_4PART: ${{ steps.meta.outputs.version_4part }}
+          SOURCE_URL: ${{ steps.meta.outputs.source_url }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+          TIMESTAMP: ${{ steps.meta.outputs.timestamp }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+
+          jq \
+            --arg version "${VERSION_4PART}" \
+            --arg changelog "Release ${TAG}" \
+            --arg targetAbi "12.1.0.0" \
+            --arg sourceUrl "${SOURCE_URL}" \
+            --arg checksum "${CHECKSUM}" \
+            --arg timestamp "${TIMESTAMP}" \
+            '(.[0].versions) |= (
+              [{
+                version: $version,
+                changelog: $changelog,
+                targetAbi: $targetAbi,
+                sourceUrl: $sourceUrl,
+                checksum: $checksum,
+                timestamp: $timestamp
+              }] + map(select(.version != $version))
+            )' manifest.json > manifest.json.tmp
+          mv manifest.json.tmp manifest.json
+
+          BOT_NAME="github-actions[bot]"
+          BOT_EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "${BOT_NAME}"
+          git config user.email "${BOT_EMAIL}"
+          git add manifest.json
+          if ! git diff --cached --quiet; then
+            MSG="chore: update manifest.json for ${TAG} [skip ci]"
+            git commit -m "${MSG}"
+            git push origin main
+          fi

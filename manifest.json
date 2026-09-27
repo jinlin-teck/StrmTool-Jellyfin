@@ -1,0 +1,12 @@
+[
+  {
+    "guid": "6107fc8c-883a-4171-b70e-7590658706b9",
+    "name": "StrmTool",
+    "description": "从 strm 文件中提取媒体技术信息（编解码器、分辨率、字幕），支持本地缓存、元数据防重置及 STRM 音乐播放与外挂歌词。",
+    "overview": "预提取 strm 媒体技术信息，加速起播速度，支持本地缓存与 STRM 音乐播放",
+    "owner": "jinlin-teck",
+    "category": "General",
+    "imageUrl": "https://raw.githubusercontent.com/jinlin-teck/StrmTool-Jellyfin/main/thumb.png",
+    "versions": []
+  }
+]
