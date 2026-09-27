@@ -41,21 +41,24 @@
 
 > ⚠️ **版本要求**：当前版本（`v2.5.0`）专为 **Jellyfin 12.1.0**（基于 .NET 10）构建，不兼容 Jellyfin 10.11.x 或更早版本。请根据你的 Jellyfin 服务端版本下载对应版本的插件。
 
-### 方式一：通过 Jellyfin 插件存储库在线安装（推荐）
+### 方式一：添加插件存储库在线安装（推荐，支持后台更新）
 
-1. 进入 **Jellyfin 控制台 → 插件 → 存储库**，点击添加按钮，填入以下存储库地址：
-   ```text
-   https://raw.githubusercontent.com/jinlin-teck/StrmTool-Jellyfin/main/manifest.json
-   ```
-2. 进入 **目录（Catalog）**，找到 **StrmTool** 并点击安装。
-3. 重启 Jellyfin 服务。
+1. 进入 **Jellyfin 控制台 → 插件**，点击页面右上角的 **「管理存储库」** 按钮。
+2. 点击左上角的 **「+ 新建存储库」**，填入以下信息并点击 **「保存」**：
+   - **存储库名称**：`StrmTool`
+   - **存储库 URL**：
+     ```text
+     https://raw.githubusercontent.com/jinlin-teck/StrmTool-Jellyfin/main/manifest.json
+     ```
+3. 打开插件 **「目录」（Catalog）**，在 `General`（常规）分类下找到 **StrmTool**，点击进入并点击 **「安装」**。
+4. 安装完成后**重启 Jellyfin 服务**即可生效。
 
-### 方式二：手动下载 DLL 安装
+### 方式二：手动下载安装
 
-1. 从 [Releases](https://github.com/jinlin-teck/StrmTool-Jellyfin/releases) 页面下载最新版本的 `StrmTool.dll`（或解压 `.zip` 包）。
+1. 从 [Releases](https://github.com/jinlin-teck/StrmTool-Jellyfin/releases) 页面下载最新版本的 `StrmTool.dll`（或下载 `StrmTool_x.x.x.x.zip` 解压）。
 2. 进入 Jellyfin 配置目录下的插件文件夹（例如 Docker 环境通常为 `/config/plugins`），新建文件夹 `StrmTool`。
-3. 将 `StrmTool.dll` 放入 `StrmTool` 文件夹中，重启 Jellyfin 服务。
-4. 进入 **控制台 → 插件**，看到 `StrmTool` 即表示安装成功。
+3. 将文件放入 `StrmTool` 文件夹中，重启 Jellyfin 服务。
+4. 进入 **控制台 → 插件**，看到 `StrmTool` 状态为 `Active` 即表示安装成功。
 
 ---
 

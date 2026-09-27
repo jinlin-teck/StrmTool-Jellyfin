@@ -41,21 +41,24 @@
 
 > ⚠️ **Compatibility**: Version `v2.5.0` is built specifically for **Jellyfin 12.1.0** (.NET 10). Compatibility with Jellyfin 10.11.x or earlier versions is not supported. Please choose the plugin build matching your Jellyfin server version.
 
-### Method 1: Install via Jellyfin Plugin Repository (Recommended)
+### Method 1: Install via Jellyfin Plugin Repository (Recommended, Supports Updates)
 
-1. Go to **Jellyfin Dashboard → Plugins → Repositories**, click Add, and enter the repository URL:
-   ```text
-   https://raw.githubusercontent.com/jinlin-teck/StrmTool-Jellyfin/main/manifest.json
-   ```
-2. Open the **Catalog**, find **StrmTool**, and click Install.
-3. Restart the Jellyfin server.
+1. Go to **Jellyfin Dashboard → Plugins** and click **Manage Repositories** in the top-right corner.
+2. Click **+ New Repository** in the top-left corner, fill in the following details, and click **Save**:
+   - **Repository Name**: `StrmTool`
+   - **Repository URL**:
+     ```text
+     https://raw.githubusercontent.com/jinlin-teck/StrmTool-Jellyfin/main/manifest.json
+     ```
+3. Open the plugin **Catalog**, find **StrmTool** under the `General` category, and click **Install**.
+4. **Restart the Jellyfin server** to activate the plugin.
 
-### Method 2: Manual DLL Installation
+### Method 2: Manual Installation
 
-1. Download `StrmTool.dll` (or extract the `.zip` archive) from the [Releases](https://github.com/jinlin-teck/StrmTool-Jellyfin/releases) page.
+1. Download `StrmTool.dll` (or extract `StrmTool_x.x.x.x.zip`) from the [Releases](https://github.com/jinlin-teck/StrmTool-Jellyfin/releases) page.
 2. Create a `StrmTool` folder inside your Jellyfin `plugins` directory (e.g., `/config/plugins/StrmTool` in Docker).
-3. Copy `StrmTool.dll` into the `StrmTool` folder and restart the Jellyfin server.
-4. Go to **Dashboard → Plugins** and verify that `StrmTool` is active.
+3. Copy the files into the `StrmTool` folder and restart the Jellyfin server.
+4. Go to **Dashboard → Plugins** and verify that `StrmTool` shows as `Active`.
 
 ---
 
