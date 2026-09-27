@@ -26,8 +26,7 @@ namespace StrmTool
         {
             var path = GetCachePath(strmPath);
             var key = path == null ? string.Empty : Path.GetFullPath(path);
-            var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-            return CacheLocks[(int)((uint)comparer.GetHashCode(key) % (uint)CacheLocks.Length)];
+            return CacheLocks[(int)((uint)StrmPathHelper.PathComparer.GetHashCode(key) % (uint)CacheLocks.Length)];
         }
 
         private static readonly JsonSerializerOptions JsonOptions = new()
@@ -64,9 +63,6 @@ namespace StrmTool
             return cachePath;
         }
 
-        /// <summary>
-        /// 检查路径是否包含路径遍历攻击模式
-        /// </summary>
         /// <summary>
         /// 检查路径是否包含路径遍历攻击模式
         /// 用于验证 strm 文件内容中的路径
@@ -293,7 +289,6 @@ namespace StrmTool
             var snapshot = JsonSerializer.Deserialize<List<MediaStream>>(
                 JsonSerializer.Serialize(streams ?? Enumerable.Empty<MediaStream>(), JsonOptions), JsonOptions);
             var directory = Path.GetDirectoryName(Path.GetFullPath(strmPath));
-            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
             snapshot.RemoveAll(stream =>
             {
                 if (stream == null)
@@ -304,7 +299,7 @@ namespace StrmTool
                     return true;
 
                 var fullPath = Path.GetFullPath(stream.Path, directory);
-                if (!string.Equals(Path.GetDirectoryName(fullPath), directory, comparison))
+                if (!string.Equals(Path.GetDirectoryName(fullPath), directory, StrmPathHelper.PathComparison))
                     return true;
 
                 stream.Path = Path.GetFileName(fullPath);
@@ -365,29 +360,22 @@ namespace StrmTool
         }
 
         /// <summary>
-        /// 保存完整媒体信息缓存（包含Size等元数据）
+        /// 保存完整媒体信息缓存（媒体流 + 元数据载荷）。
+        /// 媒体流保持惰性枚举语义：快照序列化在分片锁内执行，调用方可传入延迟枚举而不影响并发正确性。
         /// </summary>
+        /// <param name="strmPath">strm 文件路径</param>
+        /// <param name="mediaStreams">要缓存的媒体流（快照脱敏在锁内进行，不修改调用方对象）</param>
+        /// <param name="metadata">元数据载荷（Size/时长/容器/分辨率/码率/音频标签等），可由 <see cref="MediaInfoCacheData.FromProbeResult"/> 或 <see cref="MediaInfoCacheData.FromLibraryItem"/> 构建</param>
+        /// <param name="expectedStrmContentHash">期望的 STRM 内容指纹；不匹配时放弃保存（TOCTOU 防护）</param>
+        /// <param name="onlyIfMissing">仅当缓存文件不存在时才写入（导出任务用，不覆盖已有缓存）</param>
+        /// <param name="cancellationToken">取消令牌</param>
         public async Task<bool> SaveFullCacheAsync(
             string strmPath,
             IEnumerable<MediaStream> mediaStreams,
-            long size,
-            long? runTimeTicks,
-            string container,
+            MediaInfoCacheData metadata,
             string expectedStrmContentHash = null,
-            int width = 0,
-            int height = 0,
-            int totalBitrate = 0,
-            CancellationToken cancellationToken = default,
             bool onlyIfMissing = false,
-            bool? audioTagsProbed = null,
-            string title = null,
-            string album = null,
-            IEnumerable<string> artists = null,
-            IEnumerable<string> albumArtists = null,
-            int? trackNumber = null,
-            int? discNumber = null,
-            int? productionYear = null,
-            IEnumerable<string> genres = null)
+            CancellationToken cancellationToken = default)
         {
             var gate = GetCacheLock(strmPath);
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -420,27 +408,27 @@ namespace StrmTool
                     MediaStreams = streamsToCache,
                     StrmContentHash = strmContentHash,
                     IsValid = true,
-                    Size = size,
-                    RunTimeTicks = runTimeTicks,
-                    Container = container,
-                    Width = width,
-                    Height = height,
-                    TotalBitrate = totalBitrate,
-                    AudioTagsProbed = audioTagsProbed,
-                    Title = NormalizeText(title),
-                    Album = NormalizeText(album),
-                    Artists = NormalizeStringList(artists),
-                    AlbumArtists = NormalizeStringList(albumArtists),
-                    TrackNumber = trackNumber,
-                    DiscNumber = discNumber,
-                    ProductionYear = productionYear,
-                    Genres = NormalizeStringList(genres)
+                    Size = metadata?.Size ?? 0,
+                    RunTimeTicks = metadata?.RunTimeTicks,
+                    Container = metadata?.Container,
+                    Width = metadata?.Width ?? 0,
+                    Height = metadata?.Height ?? 0,
+                    TotalBitrate = metadata?.TotalBitrate ?? 0,
+                    AudioTagsProbed = metadata?.AudioTagsProbed,
+                    Title = NormalizeText(metadata?.Title),
+                    Album = NormalizeText(metadata?.Album),
+                    Artists = NormalizeStringList(metadata?.Artists),
+                    AlbumArtists = NormalizeStringList(metadata?.AlbumArtists),
+                    TrackNumber = metadata?.TrackNumber,
+                    DiscNumber = metadata?.DiscNumber,
+                    ProductionYear = metadata?.ProductionYear,
+                    Genres = NormalizeStringList(metadata?.Genres)
                 };
 
                 var json = JsonSerializer.Serialize(cache, JsonOptions);
                 await WriteFileAtomicallyAsync(cachePath, json, cancellationToken).ConfigureAwait(false);
 
-                _logger.LogDebug("Saved full cache (Size={Size}) to {Path}", size, cachePath);
+                _logger.LogDebug("Saved full cache (Size={Size}) to {Path}", cache.Size, cachePath);
                 return true;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -534,72 +522,5 @@ namespace StrmTool
                 .ToList();
             return list.Count > 0 ? list : null;
         }
-
-    }
-
-    /// <summary>
-    /// 缓存数据结构
-    /// </summary>
-    public class MediaInfoCacheData
-    {
-        [JsonPropertyName("version")]
-        public string Version { get; set; }
-
-        [JsonPropertyName("timestamp")]
-        public DateTime Timestamp { get; set; }
-
-        [JsonPropertyName("mediaStreams")]
-        public List<MediaStream> MediaStreams { get; set; }
-
-        [JsonPropertyName("strmContentHash")]
-        public string StrmContentHash { get; set; }
-
-        [JsonPropertyName("isValid")]
-        public bool IsValid { get; set; }
-
-        [JsonPropertyName("size")]
-        public long Size { get; set; }
-
-        [JsonPropertyName("runTimeTicks")]
-        public long? RunTimeTicks { get; set; }
-
-        [JsonPropertyName("container")]
-        public string Container { get; set; }
-
-        [JsonPropertyName("width")]
-        public int Width { get; set; }
-
-        [JsonPropertyName("height")]
-        public int Height { get; set; }
-
-        [JsonPropertyName("totalBitrate")]
-        public int TotalBitrate { get; set; }
-
-        [JsonPropertyName("audioTagsProbed")]
-        public bool? AudioTagsProbed { get; set; }
-
-        [JsonPropertyName("title")]
-        public string Title { get; set; }
-
-        [JsonPropertyName("album")]
-        public string Album { get; set; }
-
-        [JsonPropertyName("artists")]
-        public List<string> Artists { get; set; }
-
-        [JsonPropertyName("albumArtists")]
-        public List<string> AlbumArtists { get; set; }
-
-        [JsonPropertyName("trackNumber")]
-        public int? TrackNumber { get; set; }
-
-        [JsonPropertyName("discNumber")]
-        public int? DiscNumber { get; set; }
-
-        [JsonPropertyName("productionYear")]
-        public int? ProductionYear { get; set; }
-
-        [JsonPropertyName("genres")]
-        public List<string> Genres { get; set; }
     }
 }

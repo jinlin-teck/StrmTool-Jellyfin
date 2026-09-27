@@ -22,15 +22,6 @@ namespace StrmTool
             ILibraryManager libraryManager,
             ILogger logger,
             PluginConfiguration config)
-            : this(libraryManager, logger, config, null)
-        {
-        }
-
-        public LibraryScanListener(
-            ILibraryManager libraryManager,
-            ILogger logger,
-            PluginConfiguration config,
-            MediaInfoCache mediaCache)
         {
             _logger = logger;
             _libraryManager = libraryManager;
@@ -46,10 +37,7 @@ namespace StrmTool
         /// </summary>
         public void RefreshConfig()
         {
-            if (Plugin.Instance != null)
-            {
-                _config = Plugin.Instance.Configuration;
-            }
+            _config = PluginConfigurationProvider.GetCurrent(_config);
         }
 
         private void OnItemAdded(object sender, ItemChangeEventArgs e)

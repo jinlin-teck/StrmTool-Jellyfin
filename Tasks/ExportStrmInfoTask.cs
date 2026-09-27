@@ -1,12 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using MediaBrowser.Controller.Entities;
-using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
@@ -96,50 +94,16 @@ namespace StrmTool
                 return false;
             }
 
-            // 分辨率优先取条目元数据，缺失时退回从视频流计算
-            int width = item.Width;
-            int height = item.Height;
-            if (width <= 0 || height <= 0)
-            {
-                var videoStream = StrmMediaInfoService.GetHighestResolutionVideoStream(streams);
-                if (videoStream != null)
-                {
-                    width = videoStream.Width.GetValueOrDefault();
-                    height = videoStream.Height.GetValueOrDefault();
-                }
-            }
-
-            var audio = item as Audio;
-            bool? audioTagsProbed = audio != null && !StrmMediaInfoService.HasMissingAudioMetadata(audio, LibraryManager)
-                ? true
-                : null;
-            string exportedTitle = audio != null &&
-                                   !string.IsNullOrWhiteSpace(audio.Name) &&
-                                   !string.Equals(audio.Name, Path.GetFileNameWithoutExtension(audio.Path), StringComparison.Ordinal)
-                ? audio.Name
-                : null;
+            // 从库条目当前状态构建缓存载荷（分辨率缺失时回退视频流计算，音频标签仅在完整时标记已探测）
+            var metadata = MediaInfoCacheData.FromLibraryItem(item, streams, LibraryManager);
 
             bool saved = await cache.SaveFullCacheAsync(
                 item.Path,
                 streams,
-                item.Size.GetValueOrDefault(),
-                item.RunTimeTicks,
-                item.Container,
+                metadata,
                 expectedStrmContentHash: strmContentHash,
-                width: width,
-                height: height,
-                totalBitrate: item.TotalBitrate.GetValueOrDefault(),
-                cancellationToken: cancellationToken,
                 onlyIfMissing: true,
-                audioTagsProbed: audioTagsProbed,
-                title: exportedTitle,
-                album: audio?.Album,
-                artists: audio?.Artists,
-                albumArtists: audio?.AlbumArtists,
-                trackNumber: audio?.IndexNumber,
-                discNumber: audio?.ParentIndexNumber,
-                productionYear: audio?.ProductionYear,
-                genres: audio?.Genres).ConfigureAwait(false);
+                cancellationToken: cancellationToken).ConfigureAwait(false);
 
             if (saved)
                 Logger.LogInformation("{Name}: media info exported to cache", item.Name);

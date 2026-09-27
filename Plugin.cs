@@ -129,4 +129,16 @@ namespace StrmTool
             }
         }
     }
+
+    /// <summary>
+    /// 插件配置读取辅助：插件实例存在时返回其实时配置，否则回退到提供的备用值或新建默认配置。
+    /// 供计划任务与监听器统一刷新配置引用，替代各处重复的 RefreshConfig 样板。
+    /// </summary>
+    internal static class PluginConfigurationProvider
+    {
+        public static PluginConfiguration GetCurrent(PluginConfiguration fallback = null)
+        {
+            return Plugin.Instance?.Configuration ?? fallback ?? new PluginConfiguration();
+        }
+    }
 }

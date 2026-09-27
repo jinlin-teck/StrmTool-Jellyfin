@@ -96,9 +96,11 @@ namespace StrmTool.Tests
             type.GetMethod("OnStrmFileDetected", BindingFlags.Instance | BindingFlags.NonPublic)
                 .Invoke(task, new object[] { null, item });
 
-            var queued = (ConcurrentDictionary<Guid, byte>)type
-                .GetField("_queuedAutoExtractItems", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(task);
-            Assert.True(queued.ContainsKey(item.Id));
+            var queue = type.GetField("_autoExtractQueue", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(task);
+            var isQueued = (bool)queue.GetType()
+                .GetMethod("IsQueued", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(queue, new object[] { item.Id });
+            Assert.True(isQueued);
             Assert.Equal(0, item.StreamReads);
         }
 
@@ -114,7 +116,7 @@ namespace StrmTool.Tests
                 var item = new LibraryVideo { Id = Guid.NewGuid(), Path = Path.Combine(directory, "movie.strm") };
                 File.WriteAllText(item.Path, "https://example.invalid/a.mkv");
                 var cache = new MediaInfoCache(NullLogger.Instance);
-                Assert.True(await cache.SaveFullCacheAsync(item.Path, ((IHasMediaSources)item).GetMediaStreams(), 100, 1000, "mkv"));
+                Assert.True(await cache.SaveFullCacheAsync(item.Path, ((IHasMediaSources)item).GetMediaStreams(), CacheMeta(100, 1000, "mkv")));
                 var cachePath = Path.Combine(directory, "movie.strmtool.json");
                 string original = File.ReadAllText(cachePath);
                 if (changeSource)
@@ -156,6 +158,16 @@ namespace StrmTool.Tests
             }
         }
 
+        private static MediaInfoCacheData CacheMeta(long size, long? runTimeTicks, string container)
+        {
+            return new MediaInfoCacheData
+            {
+                Size = size,
+                RunTimeTicks = runTimeTicks,
+                Container = container
+            };
+        }
+
         private static ExportStrmInfoTask CreateExportTask(BaseItem item)
         {
             var library = DispatchProxy.Create<ILibraryManager, NoOpLibraryProxy>();
@@ -189,6 +201,52 @@ namespace StrmTool.Tests
                     RefreshDelayMs = 20000
                 };
             }
+        }
+
+        [Fact]
+        public async Task CancelledRunDoesNotCountOrReportProgressForInterruptedItems()
+        {
+            using var cts = new CancellationTokenSource();
+            var reports = new ConcurrentQueue<double>();
+            var progress = new InlineProgress(reports.Enqueue);
+            var items = Enumerable.Range(0, 2).Select(_ => (BaseItem)new LibraryVideo()).ToList();
+
+            // 两个 worker 同时处理两个条目，均在处理中取消：
+            // 若进度计数放在 finally 中，取消的条目会被计入并将进度推至 100。
+            Func<BaseItem, CancellationToken, Task<bool>> action = async (_, ct) =>
+            {
+                await Task.Yield();
+                cts.Cancel();
+                ct.ThrowIfCancellationRequested();
+                return true;
+            };
+
+            var method = typeof(StrmLibraryTaskBase).GetMethod(
+                "RunItemsAsync",
+                BindingFlags.Static | BindingFlags.NonPublic,
+                null,
+                new[]
+                {
+                    typeof(IReadOnlyList<BaseItem>), typeof(SemaphoreSlim), typeof(int),
+                    typeof(Func<BaseItem, CancellationToken, Task<bool>>), typeof(IProgress<double>),
+                    typeof(Microsoft.Extensions.Logging.ILogger), typeof(CancellationToken)
+                },
+                null);
+            Assert.NotNull(method);
+
+            using var gate = new SemaphoreSlim(2, 2);
+            var invocation = (Task<int>)method.Invoke(null, new object[]
+            {
+                items, gate, 2, action, progress, NullLogger.Instance, cts.Token
+            });
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await invocation);
+            Assert.DoesNotContain(100, reports);
+        }
+
+        private sealed class InlineProgress(Action<double> report) : IProgress<double>
+        {
+            public void Report(double value) => report(value);
         }
 
         private static List<int> Filter(IReadOnlyList<int> items, Func<int, bool> predicate, CancellationToken token)

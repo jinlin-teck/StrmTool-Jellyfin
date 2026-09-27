@@ -4,7 +4,7 @@
 
 **StrmTool** 是一款专为 Jellyfin 打造的 `.strm` 媒体增强插件。它通过预提取媒体技术信息（视频编码、分辨率、HDR、音轨、字幕等）、本地持久化缓存、元数据防重置保护以及 `.strm` 音乐直连播放支持，大幅提升网盘/远程流媒体的媒体库展示效果与点播起播速度。
 
-> **当前版本**：`v2.6.0`（适用 **Jellyfin 12.1.0** / .NET 10；如果你使用的是 Emby，请前往 [StrmTool for Emby](https://github.com/jinlin-teck/StrmTool)）
+> **当前版本**：`v2.6.1`（适用 **Jellyfin 12.1.0** / .NET 10；如果你使用的是 Emby，请前往 [StrmTool for Emby](https://github.com/jinlin-teck/StrmTool)）
 >
 > **推荐搭配**：如果你还需要从 OpenList / Alist 网盘批量生成 `.strm` 文件，推荐搭配本人的另一个开源项目 [openlist-strm](https://github.com/jinlin-teck/openlist-strm)（带 WebUI 的轻量级 `.strm` 生成服务），在 Jellyfin 上获得完整的流媒体播放体验。
 
@@ -40,7 +40,7 @@
 
 ## 📦 安装方法
 
-> ⚠️ **版本要求**：当前版本（`v2.6.0`）专为 **Jellyfin 12.1.0**（基于 .NET 10）构建，不兼容 Jellyfin 10.11.x 或更早版本。请根据你的 Jellyfin 服务端版本下载对应版本的插件。
+> ⚠️ **版本要求**：当前版本（`v2.6.1`）专为 **Jellyfin 12.1.0**（基于 .NET 10）构建，不兼容 Jellyfin 10.11.x 或更早版本。请根据你的 Jellyfin 服务端版本下载对应版本的插件。
 
 ### 方式一：添加插件存储库在线安装（推荐，支持后台更新）
 

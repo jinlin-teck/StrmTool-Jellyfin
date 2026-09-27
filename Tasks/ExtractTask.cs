@@ -1,11 +1,9 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Entities;
@@ -28,14 +26,8 @@ namespace StrmTool
         private readonly ILibraryManager _libraryManager;
         private LibraryScanListener _scanListener;
         private ItemUpdateListener _updateListener;
-        private readonly CancellationTokenSource _backgroundTaskCts = new CancellationTokenSource();
-        private readonly Channel<Guid> _autoExtractQueue = Channel.CreateUnbounded<Guid>();
-        private readonly ConcurrentDictionary<Guid, byte> _queuedAutoExtractItems = new ConcurrentDictionary<Guid, byte>();
-        private readonly Task[] _autoExtractWorkers;
+        private readonly AutoExtractQueue _autoExtractQueue;
         private readonly object _eventLock = new object();
-
-        // 待处理自动提取上限：防止扫描风暴时无界排队（超出后由计划任务兜底）
-        private const int MaxPendingAutoExtractItems = 100;
 
         public ExtractTask(
             ILibraryManager libraryManager,
@@ -51,19 +43,16 @@ namespace StrmTool
             if (Plugin.Instance == null)
             {
                 _logger.LogWarning("Plugin instance not found, using default configuration");
-                _config = new PluginConfiguration();
             }
-            else
-            {
-                _config = Plugin.Instance.Configuration;
-            }
+
+            _config = PluginConfigurationProvider.GetCurrent();
 
             _semaphore = new SemaphoreSlim(_config.MaxConcurrentExtract);
 
             _libraryManager = libraryManager;
             try
             {
-                _scanListener = new LibraryScanListener(_libraryManager, _logger, _config, _mediaCache);
+                _scanListener = new LibraryScanListener(_libraryManager, _logger, _config);
                 _scanListener.StrmFileDetected += OnStrmFileDetected;
             }
             catch (Exception ex)
@@ -80,9 +69,8 @@ namespace StrmTool
                 _logger.LogError(ex, "Failed to initialize item update listener");
             }
 
-            _autoExtractWorkers = Enumerable.Range(0, _config.MaxConcurrentExtract)
-                .Select(_ => Task.Run(ProcessAutoExtractQueueAsync))
-                .ToArray();
+            // 自动提取队列：事件线程仅入队，worker 数量固定为 MaxConcurrentExtract（修改需重启生效）
+            _autoExtractQueue = new AutoExtractQueue(_config.MaxConcurrentExtract, HandleAutoExtractItemAsync, _logger);
         }
 
         public string Category => "StrmTool";
@@ -97,76 +85,23 @@ namespace StrmTool
 
         protected void RefreshConfig()
         {
-            if (Plugin.Instance != null)
-            {
-                // 注意：MaxConcurrentExtract 需要 Jellyfin 重启后生效
-                // 避免在运行时替换 semaphore 导致并发控制失效
-                _config = Plugin.Instance.Configuration;
-            }
+            // 注意：MaxConcurrentExtract 需要 Jellyfin 重启后生效
+            // 避免在运行时替换 semaphore 导致并发控制失效
+            _config = PluginConfigurationProvider.GetCurrent(_config);
         }
 
         /// <summary>
-        /// 处理 strm 文件项的通用方法
+        /// 处理 strm 文件项的通用方法（委托给 <see cref="StrmLibraryTaskBase.RunItemsAsync"/> 统一骨架；
+        /// 使用共享 <see cref="_semaphore"/>，与自动提取后台队列共用并发预算）。
         /// </summary>
-        protected async Task<int> ProcessStrmItemsAsync(
+        protected Task<int> ProcessStrmItemsAsync(
             List<BaseItem> items,
             Func<BaseItem, CancellationToken, Task<bool>> processItemAsync,
             IProgress<double> progress,
             CancellationToken cancellationToken)
         {
-            int processed = 0;
-            int succeeded = 0;
-            int total = items.Count;
-            var progressLock = new object();
-
-            int nextIndex = -1;
-            async Task WorkerAsync()
-            {
-                while (true)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    int index = Interlocked.Increment(ref nextIndex);
-                    if (index >= total)
-                    {
-                        return;
-                    }
-
-                    var item = items[index];
-                    await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
-                    try
-                    {
-                        bool hasMediaInfo = await processItemAsync(item, cancellationToken).ConfigureAwait(false);
-                        cancellationToken.ThrowIfCancellationRequested();
-                        if (hasMediaInfo)
-                        {
-                            Interlocked.Increment(ref succeeded);
-                        }
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error processing {Name} ({Path})", item.Name, item.Path);
-                    }
-                    finally
-                    {
-                        _semaphore.Release();
-                        lock (progressLock)
-                        {
-                            processed++;
-                            progress.Report(Math.Min((double)processed / total * 100, 100));
-                        }
-                    }
-                }
-            }
-
-            var tasks = Enumerable.Range(0, Math.Min(total, _config.MaxConcurrentExtract))
-                .Select(_ => Task.Run(WorkerAsync, cancellationToken));
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-            progress.Report(100);
-            return succeeded;
+            return StrmLibraryTaskBase.RunItemsAsync(
+                items, _semaphore, _config.MaxConcurrentExtract, processItemAsync, progress, _logger, cancellationToken);
         }
 
         /// <summary>
@@ -259,23 +194,9 @@ namespace StrmTool
                 await _mediaCache.SaveFullCacheAsync(
                     item.Path,
                     probeResult.MediaStreams,
-                    probeResult.Size,
-                    probeResult.RunTimeTicks,
-                    probeResult.Container,
+                    MediaInfoCacheData.FromProbeResult(probeResult),
                     expectedStrmContentHash: probeResult.StrmContentHash,
-                    width: probeResult.Width,
-                    height: probeResult.Height,
-                    totalBitrate: probeResult.TotalBitrate,
-                    cancellationToken: cancellationToken,
-                    audioTagsProbed: probeResult.AudioTagsProbed,
-                    title: probeResult.Title,
-                    album: probeResult.Album,
-                    artists: probeResult.Artists,
-                    albumArtists: probeResult.AlbumArtists,
-                    trackNumber: probeResult.TrackNumber,
-                    discNumber: probeResult.DiscNumber,
-                    productionYear: probeResult.ProductionYear,
-                    genres: probeResult.Genres).ConfigureAwait(false);
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
             return probeResult;
@@ -297,68 +218,32 @@ namespace StrmTool
             }
 
             // 不在事件线程读取媒体流/缓存；强制刷新和缓存失效交由后台统一判断。
-            if (_queuedAutoExtractItems.Count >= MaxPendingAutoExtractItems)
-            {
-                _logger.LogWarning("Auto-extract queue is full ({Max}), skipping {Name}. It will be processed by the scheduled task.",
-                    MaxPendingAutoExtractItems, fileName);
-                return;
-            }
-
-            if (!_queuedAutoExtractItems.TryAdd(item.Id, 0))
-            {
-                return;
-            }
-
-            if (!_autoExtractQueue.Writer.TryWrite(item.Id))
-            {
-                _queuedAutoExtractItems.TryRemove(item.Id, out _);
-            }
+            _autoExtractQueue.TryEnqueue(item.Id, fileName);
         }
 
-        private async Task ProcessAutoExtractQueueAsync()
+        /// <summary>
+        /// 自动提取队列的单条处理：按配置延迟后执行提取（含超时保护）。
+        /// </summary>
+        private async Task HandleAutoExtractItemAsync(Guid itemId, CancellationToken cancellationToken)
         {
-            try
+            RefreshConfig();
+            if (!_config.EnableAutoExtract)
+                return;
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(TimeSpan.FromMinutes(_config.MetadataRestoreTimeoutMinutes));
+            await Task.Delay(_config.RefreshDelayMs, cts.Token).ConfigureAwait(false);
+
+            if (!_disposed)
             {
-                await foreach (var itemId in _autoExtractQueue.Reader.ReadAllAsync(_backgroundTaskCts.Token))
+                var item = _libraryManager.GetItemById(itemId);
+                if (item == null)
                 {
-                    try
-                    {
-                        RefreshConfig();
-                        if (!_config.EnableAutoExtract)
-                            continue;
-
-                        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_backgroundTaskCts.Token);
-                        cts.CancelAfter(TimeSpan.FromMinutes(_config.MetadataRestoreTimeoutMinutes));
-                        await Task.Delay(_config.RefreshDelayMs, cts.Token).ConfigureAwait(false);
-
-                        if (!_disposed)
-                        {
-                            var item = _libraryManager.GetItemById(itemId);
-                            if (item == null)
-                            {
-                                _logger.LogWarning("Auto-extract item {ItemId} no longer exists", itemId);
-                                continue;
-                            }
-
-                            await ExtractSingleItemAsync(item, cts.Token).ConfigureAwait(false);
-                        }
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        _logger.LogDebug("Extraction cancelled for item {ItemId}", itemId);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error in auto-extract background task for item {ItemId}", itemId);
-                    }
-                    finally
-                    {
-                        _queuedAutoExtractItems.TryRemove(itemId, out _);
-                    }
+                    _logger.LogWarning("Auto-extract item {ItemId} no longer exists", itemId);
+                    return;
                 }
-            }
-            catch (OperationCanceledException) when (_backgroundTaskCts.IsCancellationRequested)
-            {
+
+                await ExtractSingleItemAsync(item, cts.Token).ConfigureAwait(false);
             }
         }
 
@@ -392,48 +277,26 @@ namespace StrmTool
                 int totalFound = allStrmItems.Count;
 
                 // 过滤阶段含缓存校验（磁盘 I/O），并行执行以缩短大库扫描的等待时间
-                var strmItems = new List<BaseItem>();
-                var filterLock = new object();
-                Parallel.ForEach(
-                    allStrmItems,
-                    new ParallelOptions
+                var strmItems = StrmLibraryTaskBase.FilterItemsInParallel(allStrmItems, item =>
+                {
+                    try
                     {
-                        MaxDegreeOfParallelism = Math.Max(2, Math.Min(Environment.ProcessorCount, 8)),
-                        CancellationToken = cancellationToken
-                    },
-                    () => new List<BaseItem>(),
-                    (item, _, local) =>
-                    {
-                        try
-                        {
-                            var mediaStreams = _mediaInfoService.GetItemMediaStreams(item);
-                            bool hasVideo = mediaStreams.Any(s => s.Type == MediaStreamType.Video);
-                            bool hasAudio = mediaStreams.Any(s => s.Type == MediaStreamType.Audio);
+                        var mediaStreams = _mediaInfoService.GetItemMediaStreams(item);
+                        bool hasVideo = mediaStreams.Any(s => s.Type == MediaStreamType.Video);
+                        bool hasAudio = mediaStreams.Any(s => s.Type == MediaStreamType.Audio);
 
-                            if (_config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio) || HasInvalidCache(item) || StrmMediaInfoService.HasMissingLocalLyrics(item, mediaStreams) || NeedsAudioMetadataRefresh(item))
-                            {
-                                local.Add(item);
-                            }
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            throw;
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Error checking media streams for {Name}", item.Name);
-                            local.Add(item);
-                        }
-
-                        return local;
-                    },
-                    local =>
+                        return _config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio) || HasInvalidCache(item) || StrmMediaInfoService.HasMissingLocalLyrics(item, mediaStreams) || NeedsAudioMetadataRefresh(item);
+                    }
+                    catch (OperationCanceledException)
                     {
-                        lock (filterLock)
-                        {
-                            strmItems.AddRange(local);
-                        }
-                    });
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error checking media streams for {Name}", item.Name);
+                        return true;
+                    }
+                }, cancellationToken);
 
                 _logger.LogInformation("Found {Count} strm files in library, {NeedRefresh} need media info",
                     totalFound, strmItems.Count);
@@ -471,7 +334,7 @@ namespace StrmTool
         /// 核心处理逻辑：从缓存加载或探测媒体流
         /// </summary>
         private async Task<(List<MediaStream> before, List<MediaStream> after, bool probed)> ProcessItemCoreAsync(
-            BaseItem item, 
+            BaseItem item,
             string logPrefix,
             CancellationToken cancellationToken)
         {
@@ -528,8 +391,8 @@ namespace StrmTool
             _logger.LogDebug("Processing {Name}", item.Name);
 
             var (beforeStreams, afterStreams, probed) = await ProcessItemCoreAsync(
-                item, 
-                "StrmTool", 
+                item,
+                "StrmTool",
                 cancellationToken).ConfigureAwait(false);
 
             // 仅在实际发起远程探测后按 RefreshDelayMs 限速（缓存命中不延迟），
@@ -583,8 +446,8 @@ namespace StrmTool
 
                 // 使用提取的通用方法处理缓存和探测
                 var (_, afterStreams, _) = await ProcessItemCoreAsync(
-                    item, 
-                    "Auto-extract", 
+                    item,
+                    "Auto-extract",
                     cancellationToken).ConfigureAwait(false);
 
                 _logger.LogInformation(
@@ -623,44 +486,9 @@ namespace StrmTool
 
             if (disposing)
             {
-                try
-                {
-                    _backgroundTaskCts.Cancel();
-                }
-                catch (ObjectDisposedException)
-                {
-                }
-
-                _autoExtractQueue.Writer.TryComplete();
-
                 // 监听器清理（内部最长等待 30s）与队列 worker 退出并行等待，避免串行阻塞
                 var listenerCleanup = Task.Run(CleanupListener);
-
-                while (_autoExtractQueue.Reader.TryRead(out _))
-                {
-                }
-                _queuedAutoExtractItems.Clear();
-
-                // Wait for queue workers before releasing the cancellation source. The semaphore
-                // is managed-only here and may still be in use by a scheduled task during unload.
-                var workers = Task.WhenAll(_autoExtractWorkers);
-                try
-                {
-                    if (workers.Wait(TimeSpan.FromSeconds(30)))
-                    {
-                        _backgroundTaskCts.Dispose();
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Timeout waiting for auto-extract workers to stop");
-                        _ = workers.ContinueWith(_ => _backgroundTaskCts.Dispose(), TaskScheduler.Default);
-                    }
-                }
-                catch (AggregateException ex)
-                {
-                    _logger.LogWarning(ex, "Auto-extract worker stopped with an error");
-                    _backgroundTaskCts.Dispose();
-                }
+                _autoExtractQueue.Dispose();
 
                 try
                 {

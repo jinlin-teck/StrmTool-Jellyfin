@@ -4,7 +4,7 @@
 
 **StrmTool** is a `.strm` media enhancement plugin built for Jellyfin. By pre-extracting technical media information (video codec, resolution, HDR, audio tracks, subtitles, etc.), persisting local caches, protecting metadata from being reset, and enabling direct playback for `.strm` audio files, it dramatically improves library presentation and playback startup speed for cloud and remote media streams.
 
-> **Current Version**: `v2.6.0` (Targets **Jellyfin 12.1.0** / .NET 10; for Emby servers, see [StrmTool for Emby](https://github.com/jinlin-teck/StrmTool))
+> **Current Version**: `v2.6.1` (Targets **Jellyfin 12.1.0** / .NET 10; for Emby servers, see [StrmTool for Emby](https://github.com/jinlin-teck/StrmTool))
 >
 > **Recommended Companion**: Need to batch-generate `.strm` files from OpenList / Alist cloud drives? Check out my companion project [openlist-strm](https://github.com/jinlin-teck/openlist-strm) — a lightweight `.strm` generator service with WebUI that pairs seamlessly with this plugin.
 
@@ -40,7 +40,7 @@
 
 ## 📦 Installation
 
-> ⚠️ **Compatibility**: Version `v2.6.0` is built specifically for **Jellyfin 12.1.0** (.NET 10). Compatibility with Jellyfin 10.11.x or earlier versions is not supported. Please choose the plugin build matching your Jellyfin server version.
+> ⚠️ **Compatibility**: Version `v2.6.1` is built specifically for **Jellyfin 12.1.0** (.NET 10). Compatibility with Jellyfin 10.11.x or earlier versions is not supported. Please choose the plugin build matching your Jellyfin server version.
 
 ### Method 1: Install via Jellyfin Plugin Repository (Recommended, Supports Updates)
 

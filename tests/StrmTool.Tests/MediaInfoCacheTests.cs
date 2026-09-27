@@ -148,7 +148,7 @@ namespace StrmTool.Tests
             Assert.True(File.Exists(CachePath + ".bak"));
 
             // 模拟重新探测后的保存：缓存文件重新生成且可通过指纹校验
-            await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), 100, 1000, "mkv");
+            await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), CacheMeta(100, 1000, "mkv"));
             Assert.True(File.Exists(CachePath));
             Assert.True(_cache.TryGetFullCache(StrmPath, out var regenerated, verifyContentHash: true));
             Assert.Equal(100, regenerated.Size);
@@ -218,7 +218,7 @@ namespace StrmTool.Tests
                 await start.Task;
                 for (int i = 0; i < 8; i++)
                 {
-                    await _cache.SaveFullCacheAsync(StrmPath, Streams("hevc"), 200, 2000, "mp4");
+                    await _cache.SaveFullCacheAsync(StrmPath, Streams("hevc"), CacheMeta(200, 2000, "mp4"));
                 }
             });
 
@@ -241,7 +241,7 @@ namespace StrmTool.Tests
             File.WriteAllText(StrmPath, "https://example.invalid/media-b.mkv");
 
             Assert.True(_cache.TryGetFullCache(StrmPath, out _, verifyContentHash: false));
-            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("hevc"), 200, 2000, "mp4",
+            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("hevc"), CacheMeta(200, 2000, "mp4"),
                 expectedStrmContentHash: original.StrmContentHash));
 
             Assert.Equal(originalJson, File.ReadAllText(CachePath));
@@ -254,7 +254,7 @@ namespace StrmTool.Tests
             string originalJson = File.ReadAllText(CachePath);
             File.WriteAllText(StrmPath, "https://example.invalid/media-b.mkv");
 
-            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), 100, 1000, "mkv",
+            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), CacheMeta(100, 1000, "mkv"),
                 onlyIfMissing: true));
 
             Assert.Equal(originalJson, File.ReadAllText(CachePath));
@@ -268,7 +268,7 @@ namespace StrmTool.Tests
         {
             File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
             File.WriteAllText(CachePath, json);
-            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), 100, 1000, "mkv",
+            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), CacheMeta(100, 1000, "mkv"),
                 onlyIfMissing: true));
             Assert.Equal(json, File.ReadAllText(CachePath));
         }
@@ -279,7 +279,7 @@ namespace StrmTool.Tests
             File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
             var results = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ =>
                 new MediaInfoCache(NullLogger.Instance).SaveFullCacheAsync(
-                    StrmPath, Streams("h264"), 100, 1000, "mkv", onlyIfMissing: true)));
+                    StrmPath, Streams("h264"), CacheMeta(100, 1000, "mkv"), onlyIfMissing: true)));
             Assert.Single(results, saved => saved);
             Assert.True(_cache.TryGetFullCache(StrmPath, out _, verifyContentHash: true));
         }
@@ -293,7 +293,7 @@ namespace StrmTool.Tests
             var streams = Streams("h264");
             streams.Add(new MediaStream { Index = 1, Type = MediaStreamType.Subtitle, IsExternal = true, Path = subtitlePath });
             streams.Add(new MediaStream { Index = 2, Type = MediaStreamType.Subtitle, IsExternal = true, IsExternalUrl = true, Path = remotePath });
-            Assert.True(await _cache.SaveFullCacheAsync(StrmPath, streams, 100, 1000, "mkv"));
+            Assert.True(await _cache.SaveFullCacheAsync(StrmPath, streams, CacheMeta(100, 1000, "mkv")));
 
             Assert.Equal(subtitlePath, streams[1].Path);
             var serialized = JsonSerializer.Deserialize<MediaInfoCacheData>(File.ReadAllText(CachePath));
@@ -313,7 +313,7 @@ namespace StrmTool.Tests
             var streams = Streams("h264");
             string outside = Path.Combine(Path.GetTempPath(), "elsewhere", "movie.srt");
             streams.Add(new MediaStream { Type = MediaStreamType.Subtitle, IsExternal = true, Path = outside });
-            Assert.True(await _cache.SaveFullCacheAsync(StrmPath, streams, 100, 1000, "mkv"));
+            Assert.True(await _cache.SaveFullCacheAsync(StrmPath, streams, CacheMeta(100, 1000, "mkv")));
             Assert.Equal(outside, streams[1].Path);
             Assert.True(_cache.TryGetCachedMediaStreams(StrmPath, out var restored));
             Assert.Single(restored);
@@ -326,7 +326,7 @@ namespace StrmTool.Tests
             File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
             // 使用目录占据目标路径，跨平台确定性触发 rename 失败（不依赖用户权限）。
             Directory.CreateDirectory(CachePath);
-            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), 100, 1000, "mkv"));
+            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), CacheMeta(100, 1000, "mkv")));
             Assert.Empty(Directory.GetFiles(_directory, "*.tmp"));
         }
 
@@ -361,7 +361,7 @@ namespace StrmTool.Tests
             try
             {
                 await logger.Quarantined.Task.WaitAsync(TimeSpan.FromSeconds(10));
-                writer = _cache.SaveFullCacheAsync(Path.Combine(_directory, ".", "movie.strm"), TrackedStreams(), 200, 2000, "mp4");
+                writer = _cache.SaveFullCacheAsync(Path.Combine(_directory, ".", "movie.strm"), TrackedStreams(), CacheMeta(200, 2000, "mp4"));
                 // 别名路径必须归一到同一锁；写入不能越过锁去序列化快照或创建临时文件。
                 Assert.False(snapshotRequested);
                 Assert.False(writer.IsCompleted);
@@ -387,7 +387,7 @@ namespace StrmTool.Tests
             using var cts = new CancellationTokenSource();
             cts.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _cache.SaveFullCacheAsync(
-                StrmPath, Streams("h264"), 100, 1000, "mkv", cancellationToken: cts.Token));
+                StrmPath, Streams("h264"), CacheMeta(100, 1000, "mkv"), cancellationToken: cts.Token));
             Assert.False(File.Exists(CachePath));
             Assert.Empty(Directory.GetFiles(_directory, "*.tmp"));
         }
@@ -414,7 +414,7 @@ namespace StrmTool.Tests
         private async Task<MediaInfoCacheData> SaveOriginalAsync()
         {
             File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
-            await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), 100, 1000, "mkv");
+            await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), CacheMeta(100, 1000, "mkv"));
             Assert.True(_cache.TryGetFullCache(StrmPath, out var original, verifyContentHash: true));
             return original;
         }
@@ -424,6 +424,17 @@ namespace StrmTool.Tests
             return streamsOnly
                 ? _cache.TryGetCachedMediaStreams(StrmPath, out _, verifyContentHash)
                 : _cache.TryGetFullCache(StrmPath, out _, verifyContentHash);
+        }
+
+        private static MediaInfoCacheData CacheMeta(long size, long? runTimeTicks, string container, int totalBitrate = 0)
+        {
+            return new MediaInfoCacheData
+            {
+                Size = size,
+                RunTimeTicks = runTimeTicks,
+                Container = container,
+                TotalBitrate = totalBitrate
+            };
         }
 
         private static List<MediaStream> Streams(string codec)

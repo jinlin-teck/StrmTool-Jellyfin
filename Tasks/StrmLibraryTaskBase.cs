@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
@@ -52,7 +53,7 @@ namespace StrmTool
 
         protected PluginConfiguration GetConfig()
         {
-            return Plugin.Instance?.Configuration ?? new PluginConfiguration();
+            return PluginConfigurationProvider.GetCurrent();
         }
 
         /// <summary>
@@ -74,7 +75,7 @@ namespace StrmTool
         /// <summary>
         /// 并行筛选候选条目（筛选谓词可能含磁盘 I/O，并行以缩短大库等待时间）
         /// </summary>
-        protected static List<T> FilterItemsInParallel<T>(IReadOnlyList<T> items, Func<T, bool> predicate, CancellationToken cancellationToken)
+        internal static List<T> FilterItemsInParallel<T>(IReadOnlyList<T> items, Func<T, bool> predicate, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var result = new List<T>();
@@ -115,10 +116,36 @@ namespace StrmTool
         /// </summary>
         /// <returns>action 返回 true 的条目数</returns>
         protected async Task<int> RunItemsAsync(
-            IReadOnlyList<MediaBrowser.Controller.Entities.BaseItem> items,
+            IReadOnlyList<BaseItem> items,
             int maxConcurrency,
-            Func<MediaBrowser.Controller.Entities.BaseItem, CancellationToken, Task<bool>> actionAsync,
+            Func<BaseItem, CancellationToken, Task<bool>> actionAsync,
             IProgress<double> progress,
+            CancellationToken cancellationToken)
+        {
+            var concurrency = Math.Max(1, maxConcurrency);
+            using var gate = new SemaphoreSlim(concurrency, concurrency);
+            return await RunItemsAsync(items, gate, concurrency, actionAsync, progress, Logger, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// 统一的 worker 池批量处理骨架（供计划任务与 ExtractTask 共用）：
+        /// 固定 worker 数 + 原子索引分配 + 外部并发闸门，取消传播、逐条异常隔离、进度单调递增。
+        /// </summary>
+        /// <param name="items">待处理条目</param>
+        /// <param name="concurrencyGate">并发闸门（ExtractTask 传入共享信号量，与自动提取共用并发预算）</param>
+        /// <param name="workerCount">worker 数量（实际取 min(workerCount, items.Count)）</param>
+        /// <param name="actionAsync">单条处理逻辑，返回是否成功</param>
+        /// <param name="progress">进度报告</param>
+        /// <param name="logger">日志</param>
+        /// <param name="cancellationToken">取消令牌</param>
+        /// <returns>action 返回 true 的条目数</returns>
+        internal static async Task<int> RunItemsAsync(
+            IReadOnlyList<BaseItem> items,
+            SemaphoreSlim concurrencyGate,
+            int workerCount,
+            Func<BaseItem, CancellationToken, Task<bool>> actionAsync,
+            IProgress<double> progress,
+            ILogger logger,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -131,60 +158,68 @@ namespace StrmTool
 
             int processed = 0;
             int succeeded = 0;
+            int nextIndex = -1;
             var progressLock = new object();
-            var concurrency = Math.Max(1, maxConcurrency);
-            using var semaphore = new SemaphoreSlim(concurrency, concurrency);
 
-            var tasks = items.Select(async item =>
+            async Task WorkerAsync()
             {
-                await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
-                try
+                while (true)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    int index = Interlocked.Increment(ref nextIndex);
+                    if (index >= total)
+                    {
+                        return;
+                    }
 
-                    bool result;
+                    var item = items[index];
+                    await concurrencyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                     try
                     {
-                        result = await actionAsync(item, cancellationToken).ConfigureAwait(false);
+                        bool result = await actionAsync(item, cancellationToken).ConfigureAwait(false);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (result)
+                        {
+                            Interlocked.Increment(ref succeeded);
+                        }
                     }
-                    catch (OperationCanceledException)
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
                         throw;
                     }
                     catch (Exception ex)
                     {
-                        Logger.LogError(ex, "Error processing {Name} ({Path})", item.Name, item.Path);
-                        result = false;
+                        logger?.LogError(ex, "Error processing {Name} ({Path})", item.Name, item.Path);
                     }
-
-                    if (result)
+                    finally
                     {
-                        Interlocked.Increment(ref succeeded);
+                        concurrencyGate.Release();
+                    }
+
+                    // 取消时不计入进度：OperationCanceledException 直接向上传播，跳过下方计数与上报，
+                    // 避免被取消条目虚增 processed、甚至将进度误推至 100%。
+                    // 加锁保证进度单调递增，不会倒退
+                    lock (progressLock)
+                    {
+                        processed++;
+                        progress?.Report(Math.Min(processed * 100.0 / total, 100));
                     }
                 }
-                finally
-                {
-                    semaphore.Release();
-                }
+            }
 
-                // 加锁保证进度单调递增，不会倒退
-                lock (progressLock)
-                {
-                    processed++;
-                    progress?.Report(processed * 100.0 / total);
-                }
-            });
-
+            var workers = Enumerable.Range(0, Math.Max(1, Math.Min(workerCount, total)))
+                .Select(_ => Task.Run(WorkerAsync, cancellationToken));
             try
             {
-                await Task.WhenAll(tasks).ConfigureAwait(false);
+                await Task.WhenAll(workers).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                Logger.LogInformation("Task cancelled. Processed {Processed}/{Total} items.", processed, total);
+                logger?.LogInformation("Task cancelled. Processed {Processed}/{Total} items.", processed, total);
                 throw;
             }
 
+            progress?.Report(100);
             return succeeded;
         }
     }

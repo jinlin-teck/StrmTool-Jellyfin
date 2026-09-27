@@ -70,7 +70,7 @@ public sealed class MediaInfoServiceTests
             var cache = new MediaInfoCache(NullLogger.Instance);
             await cache.SaveFullCacheAsync(item.Path,
                 new List<MediaStream> { new() { Type = MediaStreamType.Video, Index = 0, Width = 1920, Height = 1080 } },
-                100000, 72000000000, "mkv");
+                new MediaInfoCacheData { Size = 100000, RunTimeTicks = 72000000000, Container = "mkv" });
             File.WriteAllText(item.Path, "https://example.invalid/new.mp4");
             var mediaInfo = new MediaInfo
             {
@@ -372,7 +372,7 @@ public sealed class MediaInfoServiceTests
 
             // 先写入一份旧版缓存（无 audioTagsProbed 和艺术家字段）
             var cache = new MediaInfoCache(NullLogger.Instance);
-            await cache.SaveFullCacheAsync(strmPath, audio.Streams, 10312071, 2549812250, "mp3", totalBitrate: 323539);
+            await cache.SaveFullCacheAsync(strmPath, audio.Streams, new MediaInfoCacheData { Size = 10312071, RunTimeTicks = 2549812250, Container = "mp3", TotalBitrate = 323539 });
 
             int probeCalls = 0;
             var mediaInfo = new MediaInfo
