@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Serialization;
 using MediaBrowser.Model.Entities;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -103,7 +105,26 @@ namespace StrmTool.Tests
 
             Assert.False(_cache.TryGetFullCache(StrmPath, out _, verifyContentHash: false));
             Assert.False(_cache.TryGetCachedMediaStreams(StrmPath, out _, verifyContentHash: false));
-            Assert.Equal(json, File.ReadAllText(CachePath));
+
+            // 坏缓存被隔离为 .bak，原文件不再保留，后续探测会重新生成
+            Assert.False(File.Exists(CachePath));
+            Assert.True(File.Exists(CachePath + ".bak"));
+        }
+
+        [Fact]
+        public async Task QuarantinedCacheCanBeRegeneratedByProbeSave()
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            File.WriteAllText(CachePath, "{invalid-json");
+
+            Assert.False(_cache.TryGetFullCache(StrmPath, out _, verifyContentHash: false));
+            Assert.True(File.Exists(CachePath + ".bak"));
+
+            // 模拟重新探测后的保存：缓存文件重新生成且可通过指纹校验
+            await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), 100, 1000, "mkv");
+            Assert.True(File.Exists(CachePath));
+            Assert.True(_cache.TryGetFullCache(StrmPath, out var regenerated, verifyContentHash: true));
+            Assert.Equal(100, regenerated.Size);
         }
 
         [Fact]
@@ -115,7 +136,10 @@ namespace StrmTool.Tests
 
             Assert.True(_cache.TryGetFullCache(StrmPath, out _, verifyContentHash: false));
             Assert.False(_cache.TryGetCachedMediaStreams(StrmPath, out _, verifyContentHash: false));
-            Assert.Equal(json, File.ReadAllText(CachePath));
+
+            // 缺少媒体流的坏缓存被隔离为 .bak
+            Assert.False(File.Exists(CachePath));
+            Assert.True(File.Exists(CachePath + ".bak"));
         }
 
         [Theory]
@@ -190,10 +214,174 @@ namespace StrmTool.Tests
             File.WriteAllText(StrmPath, "https://example.invalid/media-b.mkv");
 
             Assert.True(_cache.TryGetFullCache(StrmPath, out _, verifyContentHash: false));
-            await _cache.SaveFullCacheAsync(StrmPath, Streams("hevc"), 200, 2000, "mp4",
-                expectedStrmContentHash: original.StrmContentHash);
+            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("hevc"), 200, 2000, "mp4",
+                expectedStrmContentHash: original.StrmContentHash));
 
             Assert.Equal(originalJson, File.ReadAllText(CachePath));
+        }
+
+        [Fact]
+        public async Task ExportCannotRebindOldStreamsToChangedSource()
+        {
+            await SaveOriginalAsync();
+            string originalJson = File.ReadAllText(CachePath);
+            File.WriteAllText(StrmPath, "https://example.invalid/media-b.mkv");
+
+            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), 100, 1000, "mkv",
+                onlyIfMissing: true));
+
+            Assert.Equal(originalJson, File.ReadAllText(CachePath));
+            Assert.False(_cache.TryGetFullCache(StrmPath, out _, verifyContentHash: true));
+        }
+
+        [Theory]
+        [InlineData("{invalid-json")]
+        [InlineData("{\"isValid\":true,\"mediaStreams\":[]}")]
+        public async Task ExportDoesNotOverwriteCorruptOrLegacyCache(string json)
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            File.WriteAllText(CachePath, json);
+            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), 100, 1000, "mkv",
+                onlyIfMissing: true));
+            Assert.Equal(json, File.ReadAllText(CachePath));
+        }
+
+        [Fact]
+        public async Task ConcurrentExportsAcrossInstancesOnlyCreateOneCache()
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            var results = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ =>
+                new MediaInfoCache(NullLogger.Instance).SaveFullCacheAsync(
+                    StrmPath, Streams("h264"), 100, 1000, "mkv", onlyIfMissing: true)));
+            Assert.Single(results, saved => saved);
+            Assert.True(_cache.TryGetFullCache(StrmPath, out _, verifyContentHash: true));
+        }
+
+        [Fact]
+        public async Task SubtitleSnapshotDoesNotMutateInputAndRestoresAbsolutePaths()
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            string subtitlePath = Path.Combine(_directory, "movie.zh.srt");
+            string remotePath = "https://example.invalid/movie.en.srt";
+            var streams = Streams("h264");
+            streams.Add(new MediaStream { Index = 1, Type = MediaStreamType.Subtitle, IsExternal = true, Path = subtitlePath });
+            streams.Add(new MediaStream { Index = 2, Type = MediaStreamType.Subtitle, IsExternal = true, IsExternalUrl = true, Path = remotePath });
+            Assert.True(await _cache.SaveFullCacheAsync(StrmPath, streams, 100, 1000, "mkv"));
+
+            Assert.Equal(subtitlePath, streams[1].Path);
+            var serialized = JsonSerializer.Deserialize<MediaInfoCacheData>(File.ReadAllText(CachePath));
+            Assert.Equal("movie.zh.srt", serialized.MediaStreams[1].Path);
+            Assert.Equal(remotePath, serialized.MediaStreams[2].Path);
+            Assert.True(_cache.TryGetFullCache(StrmPath, out var full));
+            Assert.Equal(subtitlePath, full.MediaStreams[1].Path);
+            Assert.True(_cache.TryGetCachedMediaStreams(StrmPath, out var restored));
+            Assert.Equal(subtitlePath, restored[1].Path);
+            Assert.Equal(remotePath, restored[2].Path);
+        }
+
+        [Fact]
+        public async Task SubtitlesOutsideStrmDirectoryAreNotMappedToWrongFiles()
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            var streams = Streams("h264");
+            string outside = Path.Combine(Path.GetTempPath(), "elsewhere", "movie.srt");
+            streams.Add(new MediaStream { Type = MediaStreamType.Subtitle, IsExternal = true, Path = outside });
+            Assert.True(await _cache.SaveFullCacheAsync(StrmPath, streams, 100, 1000, "mkv"));
+            Assert.Equal(outside, streams[1].Path);
+            Assert.True(_cache.TryGetCachedMediaStreams(StrmPath, out var restored));
+            Assert.Single(restored);
+            Assert.DoesNotContain(outside, File.ReadAllText(CachePath));
+        }
+
+        [Fact]
+        public async Task WriteFailureReturnsFalseWithoutLeavingTemporaryFiles()
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            // 使用目录占据目标路径，跨平台确定性触发 rename 失败（不依赖用户权限）。
+            Directory.CreateDirectory(CachePath);
+            Assert.False(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), 100, 1000, "mkv"));
+            Assert.Empty(Directory.GetFiles(_directory, "*.tmp"));
+        }
+
+        [Fact]
+        public async Task TransientReadFailureDoesNotQuarantineValidCache()
+        {
+            await SaveOriginalAsync();
+            using (var exclusive = new FileStream(CachePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                Assert.False(_cache.TryGetFullCache(StrmPath, out _));
+                Assert.False(_cache.TryGetCachedMediaStreams(StrmPath, out _));
+                Assert.True(File.Exists(CachePath));
+                Assert.False(File.Exists(CachePath + ".bak"));
+            }
+            Assert.True(_cache.TryGetFullCache(StrmPath, out _));
+        }
+
+        [Fact]
+        public async Task QuarantineAndWriterShareLockAcrossCacheInstances()
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            File.WriteAllText(CachePath, "{invalid-json");
+            using var logger = new BlockingQuarantineLogger();
+            var reader = Task.Run(() => new MediaInfoCache(logger).TryGetFullCache(StrmPath, out _));
+            Task<bool> writer = null;
+            bool snapshotRequested = false;
+            IEnumerable<MediaStream> TrackedStreams()
+            {
+                snapshotRequested = true;
+                yield return new MediaStream { Index = 0, Type = MediaStreamType.Video, Codec = "hevc" };
+            }
+            try
+            {
+                await logger.Quarantined.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                writer = _cache.SaveFullCacheAsync(Path.Combine(_directory, ".", "movie.strm"), TrackedStreams(), 200, 2000, "mp4");
+                // 别名路径必须归一到同一锁；写入不能越过锁去序列化快照或创建临时文件。
+                Assert.False(snapshotRequested);
+                Assert.False(writer.IsCompleted);
+                Assert.Empty(Directory.GetFiles(_directory, "*.tmp"));
+            }
+            finally
+            {
+                logger.Release.Set();
+                await reader.WaitAsync(TimeSpan.FromSeconds(10));
+                if (writer != null)
+                    await writer.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            Assert.True(await writer);
+            Assert.True(_cache.TryGetFullCache(StrmPath, out var current));
+            Assert.Equal("hevc", Assert.Single(current.MediaStreams).Codec);
+            Assert.Equal("{invalid-json", File.ReadAllText(CachePath + ".bak"));
+        }
+
+        [Fact]
+        public async Task CancelledSaveDoesNotCreateCache()
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => _cache.SaveFullCacheAsync(
+                StrmPath, Streams("h264"), 100, 1000, "mkv", cancellationToken: cts.Token));
+            Assert.False(File.Exists(CachePath));
+            Assert.Empty(Directory.GetFiles(_directory, "*.tmp"));
+        }
+
+        private sealed class BlockingQuarantineLogger : ILogger, IDisposable
+        {
+            public TaskCompletionSource<bool> Quarantined { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public ManualResetEventSlim Release { get; } = new(false);
+            public IDisposable BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(LogLevel logLevel) => true;
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception,
+                Func<TState, Exception, string> formatter)
+            {
+                if (formatter(state, exception).Contains("moved to", StringComparison.Ordinal))
+                {
+                    Quarantined.TrySetResult(true);
+                    if (!Release.Wait(TimeSpan.FromSeconds(10)))
+                        throw new TimeoutException("Quarantine test was not released");
+                }
+            }
+            public void Dispose() => Release.Dispose();
         }
 
         private async Task<MediaInfoCacheData> SaveOriginalAsync()

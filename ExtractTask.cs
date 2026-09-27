@@ -34,6 +34,9 @@ namespace StrmTool
         private readonly Task[] _autoExtractWorkers;
         private readonly object _eventLock = new object();
 
+        // 待处理自动提取上限：防止扫描风暴时无界排队（超出后由计划任务兜底）
+        private const int MaxPendingAutoExtractItems = 100;
+
         public ExtractTask(
             ILibraryManager libraryManager,
             IMediaEncoder mediaEncoder,
@@ -221,6 +224,9 @@ namespace StrmTool
                     probeResult.RunTimeTicks,
                     probeResult.Container,
                     expectedStrmContentHash: probeResult.StrmContentHash,
+                    width: probeResult.Width,
+                    height: probeResult.Height,
+                    totalBitrate: probeResult.TotalBitrate,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
             }
 
@@ -239,6 +245,14 @@ namespace StrmTool
             if (!_config.EnableAutoExtract)
             {
                 _logger.LogDebug("Auto-extract is disabled, skipping {Name}", fileName);
+                return;
+            }
+
+            // 不在事件线程读取媒体流/缓存；强制刷新和缓存失效交由后台统一判断。
+            if (_queuedAutoExtractItems.Count >= MaxPendingAutoExtractItems)
+            {
+                _logger.LogWarning("Auto-extract queue is full ({Max}), skipping {Name}. It will be processed by the scheduled task.",
+                    MaxPendingAutoExtractItems, fileName);
                 return;
             }
 
@@ -327,33 +341,51 @@ namespace StrmTool
             try
             {
                 var allStrmItems = _mediaInfoService.GetAllStrmItems(cancellationToken);
-                var strmItems = new List<BaseItem>();
                 int totalFound = allStrmItems.Count;
 
-                foreach (var item in allStrmItems)
-                {
-                    if (cancellationToken.IsCancellationRequested)
+                // 过滤阶段含缓存校验（磁盘 I/O），并行执行以缩短大库扫描的等待时间
+                var strmItems = new List<BaseItem>();
+                var filterLock = new object();
+                Parallel.ForEach(
+                    allStrmItems,
+                    new ParallelOptions
                     {
-                        break;
-                    }
-
-                    try
+                        MaxDegreeOfParallelism = Math.Max(2, Math.Min(Environment.ProcessorCount, 8)),
+                        CancellationToken = cancellationToken
+                    },
+                    () => new List<BaseItem>(),
+                    (item, _, local) =>
                     {
-                        var mediaStreams = _mediaInfoService.GetItemMediaStreams(item);
-                        bool hasVideo = mediaStreams.Any(s => s.Type == MediaStreamType.Video);
-                        bool hasAudio = mediaStreams.Any(s => s.Type == MediaStreamType.Audio);
-
-                        if (_config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio) || HasInvalidCache(item))
+                        try
                         {
-                            strmItems.Add(item);
+                            var mediaStreams = _mediaInfoService.GetItemMediaStreams(item);
+                            bool hasVideo = mediaStreams.Any(s => s.Type == MediaStreamType.Video);
+                            bool hasAudio = mediaStreams.Any(s => s.Type == MediaStreamType.Audio);
+
+                            if (_config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio) || HasInvalidCache(item))
+                            {
+                                local.Add(item);
+                            }
                         }
-                    }
-                    catch (Exception ex)
+                        catch (OperationCanceledException)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error checking media streams for {Name}", item.Name);
+                            local.Add(item);
+                        }
+
+                        return local;
+                    },
+                    local =>
                     {
-                        _logger.LogError(ex, "Error checking media streams for {Name}", item.Name);
-                        strmItems.Add(item);
-                    }
-                }
+                        lock (filterLock)
+                        {
+                            strmItems.AddRange(local);
+                        }
+                    });
 
                 _logger.LogInformation("Found {Count} strm files in library, {NeedRefresh} need media info",
                     totalFound, strmItems.Count);

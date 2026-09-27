@@ -27,6 +27,9 @@ namespace StrmTool
         public long? RunTimeTicks { get; set; }
         public string Container { get; set; }
         public string StrmContentHash { get; set; }
+        public int Width { get; set; }
+        public int Height { get; set; }
+        public int TotalBitrate { get; set; }
         public bool Success => MediaStreams != null && MediaStreams.Count > 0;
     }
 
@@ -68,127 +71,47 @@ namespace StrmTool
         }
 
         /// <summary>
-        /// 递归查找目录下所有的 strm 文件
-        /// </summary>
-        /// <param name="directoryPath">要扫描的目录路径</param>
-        /// <param name="cancellationToken">取消令牌</param>
-        /// <returns>找到的所有 strm 文件对应的库条目列表</returns>
-        public List<BaseItem> FindStrmFilesInDirectory(string directoryPath, CancellationToken cancellationToken)
-        {
-            var strmFiles = new List<BaseItem>();
-            var dirs = new Stack<string>();
-            dirs.Push(directoryPath);
-
-            while (dirs.Count > 0)
-            {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    break;
-                }
-
-                var current = dirs.Pop();
-                try
-                {
-                    IEnumerable<string> files = Enumerable.Empty<string>();
-                    try
-                    {
-                        files = Directory.EnumerateFiles(current)
-                            .Where(path => IsStrmFile(path));
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Error enumerating files in {Directory}", current);
-                    }
-
-                    foreach (var strmPath in files)
-                    {
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            break;
-                        }
-
-                        try
-                        {
-                            var item = _libraryManager.FindByPath(strmPath, false);
-                            if (item != null)
-                            {
-                                strmFiles.Add(item);
-                            }
-                            else
-                            {
-                                _logger.LogDebug("Could not find library item for path: {Path}", strmPath);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogDebug(ex, "Error processing file {Path}", strmPath);
-                        }
-                    }
-
-                    IEnumerable<string> subDirs = Enumerable.Empty<string>();
-                    try
-                    {
-                        subDirs = Directory.EnumerateDirectories(current);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Error enumerating directories in {Directory}", current);
-                    }
-
-                    foreach (var sub in subDirs)
-                    {
-                        if (cancellationToken.IsCancellationRequested)
-                        {
-                            break;
-                        }
-
-                        dirs.Push(sub);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error scanning directory {Directory}", current);
-                }
-            }
-
-            return strmFiles;
-        }
-
-        /// <summary>
         /// 获取库中所有的 strm 文件（去重）
         /// </summary>
-        /// <param name="cancellationToken">取消令牌</param>
+        /// <param name="cancellationToken">取消令牌（库查询本身不支持取消，在查询前后检查）</param>
         /// <returns>所有 strm 文件对应的库条目列表，永不为 null</returns>
         public List<BaseItem> GetAllStrmItems(CancellationToken cancellationToken)
         {
-            var rootFolders = _libraryManager.GetVirtualFolders()
-                .SelectMany(vf => vf.Locations)
-                .Distinct()
-                .ToList();
-
-            var strmItems = new List<BaseItem>();
-            foreach (var rootFolder in rootFolders)
+            cancellationToken.ThrowIfCancellationRequested();
+            // 通过库查询直接取候选条目（strm 入库后即 Movie/Episode/Video/Audio），再按扩展名内存过滤；
+            // 相比递归磁盘枚举，避免了全目录遍历、权限目录处理以及逐文件 FindByPath 的数据库往返
+            var query = new InternalItemsQuery
             {
-                if (cancellationToken.IsCancellationRequested)
+                Recursive = true,
+                IsVirtualItem = false,
+                IncludeItemTypes = new[]
                 {
-                    break;
+                    BaseItemKind.Movie,
+                    BaseItemKind.Episode,
+                    BaseItemKind.Video,
+                    BaseItemKind.Audio
                 }
+            };
 
-                try
-                {
-                    strmItems.AddRange(FindStrmFilesInDirectory(rootFolder, cancellationToken));
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error scanning folder {Folder}", rootFolder);
-                }
+            try
+            {
+                var items = _libraryManager.GetItemList(query);
+                cancellationToken.ThrowIfCancellationRequested();
+                return items
+                    .Where(i => i != null && !string.IsNullOrWhiteSpace(i.Path) && IsStrmFile(i.Path))
+                    .GroupBy(i => i.Path, OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase)
+                    .Select(g => g.First())
+                    .ToList();
             }
-
-            return strmItems
-                .Where(i => i != null && !string.IsNullOrWhiteSpace(i.Path))
-                .GroupBy(i => i.Path, OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase)
-                .Select(g => g.First())
-                .ToList();
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error querying library for strm items");
+                return new List<BaseItem>();
+            }
         }
 
         /// <summary>
@@ -292,6 +215,14 @@ namespace StrmTool
                     result.RunTimeTicks = mediaInfo.RunTimeTicks;
                     result.Container = mediaInfo.Container;
                     result.StrmContentHash = strmContentHash;
+                    result.TotalBitrate = (int)Math.Min(int.MaxValue, mediaInfo.Bitrate.GetValueOrDefault());
+
+                    var highestVideoStream = GetHighestResolutionVideoStream(result.MediaStreams);
+                    if (highestVideoStream != null)
+                    {
+                        result.Width = highestVideoStream.Width.GetValueOrDefault();
+                        result.Height = highestVideoStream.Height.GetValueOrDefault();
+                    }
 
                     _logger.LogDebug("Successfully saved {Count} media streams for {Name} (item metadata will be restored later via cache)",
                         mediaInfo.MediaStreams.Count, fileName);
@@ -301,11 +232,100 @@ namespace StrmTool
                 _logger.LogDebug("No media streams found for {Name}", fileName);
                 return result;
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // 取消不属于错误：向上传播，由调用方统一处理
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error probing STRM content for {Name}", fileName);
                 return result;
             }
+        }
+
+        /// <summary>
+        /// 从媒体流列表中获取最高分辨率的视频流
+        /// </summary>
+        public static MediaStream GetHighestResolutionVideoStream(IEnumerable<MediaStream> streams)
+        {
+            if (streams == null)
+            {
+                return null;
+            }
+
+            return streams
+                .Where(s => s.Type == MediaStreamType.Video && s.Width.HasValue && s.Height.HasValue)
+                .OrderByDescending(s => (long)s.Width.Value * s.Height.Value)
+                .FirstOrDefault();
+        }
+
+        /// <summary>
+        /// 判断缓存元数据是否需要恢复（尺寸被重置，或时长/容器/分辨率/码率缺失）
+        /// </summary>
+        public static bool NeedsRestore(BaseItem item, MediaInfoCacheData cacheData)
+        {
+            return IsSizeReset(item, cacheData)
+                || (cacheData.RunTimeTicks.HasValue && !item.RunTimeTicks.HasValue)
+                || (!string.IsNullOrEmpty(cacheData.Container) && string.IsNullOrEmpty(item.Container))
+                || (cacheData.Width > 0 && item.Width <= 0)
+                || (cacheData.Height > 0 && item.Height <= 0)
+                || (cacheData.TotalBitrate > 0 && item.TotalBitrate.GetValueOrDefault() <= 0);
+        }
+
+        /// <summary>
+        /// 判断条目尺寸是否被重置为 strm 文件本身大小（不足缓存值的 1/10）
+        /// </summary>
+        public static bool IsSizeReset(BaseItem item, MediaInfoCacheData cacheData)
+        {
+            return cacheData.Size > 0 && item.Size.GetValueOrDefault() < cacheData.Size / 10;
+        }
+
+        /// <summary>
+        /// 从缓存恢复条目的元数据字段（仅恢复仍缺失的字段），返回是否有修改。
+        /// 不执行写库，由调用方决定持久化方式。
+        /// </summary>
+        public static bool TryRestoreMetadataFromCache(BaseItem item, MediaInfoCacheData cacheData)
+        {
+            bool changed = false;
+
+            if (IsSizeReset(item, cacheData))
+            {
+                item.Size = cacheData.Size;
+                changed = true;
+            }
+
+            if (cacheData.RunTimeTicks.HasValue && !item.RunTimeTicks.HasValue)
+            {
+                item.RunTimeTicks = cacheData.RunTimeTicks;
+                changed = true;
+            }
+
+            if (!string.IsNullOrEmpty(cacheData.Container) && string.IsNullOrEmpty(item.Container))
+            {
+                item.Container = cacheData.Container;
+                changed = true;
+            }
+
+            if (cacheData.Width > 0 && item.Width <= 0)
+            {
+                item.Width = cacheData.Width;
+                changed = true;
+            }
+
+            if (cacheData.Height > 0 && item.Height <= 0)
+            {
+                item.Height = cacheData.Height;
+                changed = true;
+            }
+
+            if (cacheData.TotalBitrate > 0 && item.TotalBitrate.GetValueOrDefault() <= 0)
+            {
+                item.TotalBitrate = cacheData.TotalBitrate;
+                changed = true;
+            }
+
+            return changed;
         }
 
         private static MediaProtocol GetProtocolFromPath(string path)

@@ -33,5 +33,9 @@
   "StrmTool.LblMetadataRestoreTimeout": "元数据恢复超时限制",
   "StrmTool.DescMetadataRestoreTimeout": "当 strm 文件大小被更新重置时，等待元数据恢复的最大超时时间（1-30 分钟）",
   "StrmTool.UnitMs": "毫秒 (ms)",
-  "StrmTool.UnitMinutes": "分钟 (min)"
+  "StrmTool.UnitMinutes": "分钟 (min)",
+  "StrmTool.ExportTaskName": "导出Strm媒体信息缓存",
+  "StrmTool.ExportTaskDescription": "将库中已有的 strm 媒体信息批量导出为本地 .strmtool.json 缓存文件，无需远程探测。",
+  "StrmTool.RestoreTaskName": "从缓存恢复Strm媒体信息",
+  "StrmTool.RestoreTaskDescription": "从有效的 .strmtool.json 缓存文件批量恢复 strm 的媒体流与元数据，无需远程探测。"
 }

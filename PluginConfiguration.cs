@@ -10,12 +10,12 @@ namespace StrmTool
         private int _metadataRestoreTimeoutMinutes = 5;
 
         /// <summary>
-        /// 刷新延迟时间（毫秒）
+        /// 刷新延迟时间（毫秒，0-20000）
         /// </summary>
         public int RefreshDelayMs
         {
             get => _refreshDelayMs;
-            set => _refreshDelayMs = Math.Max(0, value);
+            set => _refreshDelayMs = Math.Clamp(value, 0, 20000);
         }
 
         /// <summary>

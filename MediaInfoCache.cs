@@ -18,6 +18,18 @@ namespace StrmTool
         private readonly ILogger _logger;
         private const string CacheFileSuffix = ".strmtool.json";
 
+        // 有界分片锁：所有实例共用，覆盖读取、隔离和写入的整个事务。
+        private static readonly SemaphoreSlim[] CacheLocks = Enumerable.Range(0, 64)
+            .Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+
+        private static SemaphoreSlim GetCacheLock(string strmPath)
+        {
+            var path = GetCachePath(strmPath);
+            var key = path == null ? string.Empty : Path.GetFullPath(path);
+            var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            return CacheLocks[(int)((uint)comparer.GetHashCode(key) % (uint)CacheLocks.Length)];
+        }
+
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
@@ -122,14 +134,32 @@ namespace StrmTool
         }
 
         /// <summary>
+        /// 验证缓存数据结构有效性（不含指纹校验）。
+        /// 结构无效的文件视为坏缓存，隔离为 .bak 以便后续重新探测覆写。
+        /// </summary>
+        private bool ValidateCacheStructure(MediaInfoCacheData cache, string cachePath, bool requireMediaStreams)
+        {
+            if (cache?.IsValid != true)
+            {
+                QuarantineInvalidCacheFile(cachePath, "cache data is invalid or missing");
+                return false;
+            }
+
+            if (requireMediaStreams && cache.MediaStreams == null)
+            {
+                QuarantineInvalidCacheFile(cachePath, "media streams missing");
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// 验证缓存数据是否有效
         /// </summary>
         private bool ValidateCacheData(MediaInfoCacheData cache, string strmPath, bool requireMediaStreams = true, bool? verifyContentHash = null)
         {
-            if (cache?.IsValid != true)
-                return false;
-            
-            if (requireMediaStreams && cache.MediaStreams == null)
+            if (!ValidateCacheStructure(cache, GetCachePath(strmPath), requireMediaStreams))
                 return false;
 
             bool shouldVerify = verifyContentHash ?? (Plugin.Instance?.Configuration?.VerifyStrmContentHash ?? true);
@@ -143,6 +173,34 @@ namespace StrmTool
             // STRM 文件暂不可读（哈希为 null）时同样判为无效，触发重探测而非使用过期缓存。
             return !string.IsNullOrEmpty(cache.StrmContentHash) &&
                    string.Equals(cache.StrmContentHash, GetStrmContentHash(strmPath), StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// 将无效缓存文件重命名为 .bak（带序号防冲突），使后续探测重新生成缓存
+        /// </summary>
+        private void QuarantineInvalidCacheFile(string cachePath, string reason)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(cachePath) || !File.Exists(cachePath))
+                {
+                    return;
+                }
+
+                var backupPath = cachePath + ".bak";
+                var suffix = 1;
+                while (File.Exists(backupPath))
+                {
+                    backupPath = cachePath + "." + suffix++ + ".bak";
+                }
+
+                File.Move(cachePath, backupPath);
+                _logger.LogWarning("Invalid media info cache ({Reason}): {Path} moved to {Backup}", reason, cachePath, backupPath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not move invalid cache file {Path} to .bak", cachePath);
+            }
         }
 
         /// <summary>
@@ -177,29 +235,9 @@ namespace StrmTool
         /// </summary>
         public bool TryGetCachedMediaStreams(string strmPath, out List<MediaStream> mediaStreams, bool? verifyContentHash = null)
         {
-            mediaStreams = null;
-
-            var (valid, cachePath) = ValidateCachePath(strmPath);
-            if (!valid)
-                return false;
-
-            try
-            {
-                var json = File.ReadAllText(cachePath);
-                var cache = JsonSerializer.Deserialize<MediaInfoCacheData>(json, JsonOptions);
-
-                if (!ValidateCacheData(cache, strmPath, verifyContentHash: verifyContentHash))
-                    return false;
-
-                mediaStreams = cache.MediaStreams;
-                _logger.LogDebug("Loaded cached media streams from {Path}", cachePath);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error reading cache from {Path}", strmPath);
-                return false;
-            }
+            bool found = TryReadCache(strmPath, out var cache, requireMediaStreams: true, verifyContentHash);
+            mediaStreams = found ? cache.MediaStreams : null;
+            return found;
         }
 
         /// <summary>
@@ -213,14 +251,9 @@ namespace StrmTool
                 tempPath = filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 await File.WriteAllTextAsync(tempPath, content, cancellationToken).ConfigureAwait(false);
 
-                if (File.Exists(filePath))
-                {
-                    File.Replace(tempPath, filePath, null);
-                }
-                else
-                {
-                    File.Move(tempPath, filePath);
-                }
+                cancellationToken.ThrowIfCancellationRequested();
+                // 临时文件与目标位于同目录；调用方持有路径锁，隔离不会移走新版本。
+                File.Move(tempPath, filePath, overwrite: true);
             }
             catch
             {
@@ -248,6 +281,62 @@ namespace StrmTool
         }
 
         /// <summary>
+        /// 创建独立快照。同目录本地字幕保存文件名，读取时还原；其他目录的字幕交由 Jellyfin 重新发现。
+        /// </summary>
+        private static List<MediaStream> CreateStreamsForCache(IEnumerable<MediaStream> streams, string strmPath)
+        {
+            var snapshot = JsonSerializer.Deserialize<List<MediaStream>>(
+                JsonSerializer.Serialize(streams ?? Enumerable.Empty<MediaStream>(), JsonOptions), JsonOptions);
+            var directory = Path.GetDirectoryName(Path.GetFullPath(strmPath));
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            snapshot.RemoveAll(stream =>
+            {
+                if (stream == null)
+                    return true;
+                if (!IsLocalSubtitle(stream))
+                    return false;
+                if (string.IsNullOrWhiteSpace(stream.Path) || ContainsPathTraversal(stream.Path))
+                    return true;
+
+                var fullPath = Path.GetFullPath(stream.Path, directory);
+                if (!string.Equals(Path.GetDirectoryName(fullPath), directory, comparison))
+                    return true;
+
+                stream.Path = Path.GetFileName(fullPath);
+                return false;
+            });
+            return snapshot;
+        }
+
+        private static bool IsLocalSubtitle(MediaStream stream) =>
+            stream.IsExternal && stream.Type == MediaStreamType.Subtitle && stream.IsExternalUrl != true;
+
+        private static void RestoreSubtitlePaths(List<MediaStream> streams, string strmPath)
+        {
+            if (streams == null)
+                return;
+
+            var directory = Path.GetDirectoryName(Path.GetFullPath(strmPath));
+            streams.RemoveAll(stream =>
+            {
+                if (stream == null)
+                    return true;
+                if (!IsLocalSubtitle(stream))
+                    return false;
+                if (string.IsNullOrWhiteSpace(stream.Path) || ContainsPathTraversal(stream.Path))
+                    return true;
+                // 兼容旧缓存的绝对路径；新格式只接受单个文件名，不解析任意相对目录。
+                if (!Path.IsPathRooted(stream.Path))
+                {
+                    if (stream.Path.IndexOfAny(new[] { '/', '\\' }) >= 0 || stream.Path == "." || stream.Path == "..")
+                        return true;
+                    stream.Path = Path.Combine(directory, stream.Path);
+                }
+                return false;
+            });
+        }
+
+        /// <summary>
         /// 验证保存缓存的前置条件
         /// </summary>
         private (bool valid, string cachePath) ValidateSaveCache(string strmPath)
@@ -271,55 +360,77 @@ namespace StrmTool
         /// <summary>
         /// 保存完整媒体信息缓存（包含Size等元数据）
         /// </summary>
-        public async Task SaveFullCacheAsync(
+        public async Task<bool> SaveFullCacheAsync(
             string strmPath,
             IEnumerable<MediaStream> mediaStreams,
             long size,
             long? runTimeTicks,
             string container,
             string expectedStrmContentHash = null,
-            CancellationToken cancellationToken = default)
+            int width = 0,
+            int height = 0,
+            int totalBitrate = 0,
+            CancellationToken cancellationToken = default,
+            bool onlyIfMissing = false)
         {
+            var gate = GetCacheLock(strmPath);
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 var (valid, cachePath) = ValidateSaveCache(strmPath);
-                if (!valid)
-                    return;
+                if (!valid || (onlyIfMissing && File.Exists(cachePath)))
+                    return false;
 
                 var strmContentHash = GetStrmContentHash(strmPath);
                 if (strmContentHash == null)
                 {
                     _logger.LogWarning("STRM file unreadable; skipping cache save for {Path}", strmPath);
-                    return;
+                    return false;
                 }
 
                 if (expectedStrmContentHash != null &&
                     !string.Equals(expectedStrmContentHash, strmContentHash, StringComparison.Ordinal))
                 {
-                    _logger.LogWarning("STRM content changed during probing; skipping cache save for {Path}", strmPath);
-                    return;
+                    _logger.LogWarning("STRM content changed during cache save; skipping cache save for {Path}", strmPath);
+                    return false;
                 }
+
+                var streamsToCache = CreateStreamsForCache(mediaStreams, strmPath);
 
                 var cache = new MediaInfoCacheData
                 {
                     Version = "1.0",
                     Timestamp = DateTime.UtcNow,
-                    MediaStreams = mediaStreams?.ToList() ?? new List<MediaStream>(),
+                    MediaStreams = streamsToCache,
                     StrmContentHash = strmContentHash,
                     IsValid = true,
                     Size = size,
                     RunTimeTicks = runTimeTicks,
-                    Container = container
+                    Container = container,
+                    Width = width,
+                    Height = height,
+                    TotalBitrate = totalBitrate
                 };
 
                 var json = JsonSerializer.Serialize(cache, JsonOptions);
                 await WriteFileAtomicallyAsync(cachePath, json, cancellationToken).ConfigureAwait(false);
 
                 _logger.LogDebug("Saved full cache (Size={Size}) to {Path}", size, cachePath);
+                return true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // 取消时中止写缓存：临时文件已在 WriteFileAtomicallyAsync 内清理，向上传播取消
+                throw;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error saving full cache to {Path}", strmPath);
+                return false;
+            }
+            finally
+            {
+                gate.Release();
             }
         }
 
@@ -328,28 +439,48 @@ namespace StrmTool
         /// </summary>
         public bool TryGetFullCache(string strmPath, out MediaInfoCacheData cacheData, bool? verifyContentHash = null)
         {
+            return TryReadCache(strmPath, out cacheData, requireMediaStreams: false, verifyContentHash);
+        }
+
+        private bool TryReadCache(string strmPath, out MediaInfoCacheData cacheData, bool requireMediaStreams, bool? verifyContentHash)
+        {
             cacheData = null;
-
-            var (valid, cachePath) = ValidateCachePath(strmPath);
-            if (!valid)
-                return false;
-
+            var gate = GetCacheLock(strmPath);
+            gate.Wait();
+            string cachePath = null;
             try
             {
+                var validated = ValidateCachePath(strmPath);
+                cachePath = validated.cachePath;
+                if (!validated.valid)
+                    return false;
+
                 var json = File.ReadAllText(cachePath);
                 var cache = JsonSerializer.Deserialize<MediaInfoCacheData>(json, JsonOptions);
 
-                if (!ValidateCacheData(cache, strmPath, requireMediaStreams: false, verifyContentHash: verifyContentHash))
+                if (!ValidateCacheData(cache, strmPath, requireMediaStreams, verifyContentHash))
                     return false;
 
+                RestoreSubtitlePaths(cache.MediaStreams, strmPath);
                 cacheData = cache;
                 _logger.LogDebug("Loaded full cache (Size={Size}) from {Path}", cache.Size, cachePath);
                 return true;
             }
+            catch (JsonException ex)
+            {
+                QuarantineInvalidCacheFile(cachePath, "JSON cannot be deserialized");
+                _logger.LogWarning(ex, "Invalid JSON cache for {Path}", strmPath);
+                return false;
+            }
             catch (Exception ex)
             {
+                // 读取失败不等于格式损坏；权限/共享冲突等暂态错误不能触发隔离。
                 _logger.LogWarning(ex, "Error reading full cache from {Path}", strmPath);
                 return false;
+            }
+            finally
+            {
+                gate.Release();
             }
         }
 
@@ -383,5 +514,14 @@ namespace StrmTool
 
         [JsonPropertyName("container")]
         public string Container { get; set; }
+
+        [JsonPropertyName("width")]
+        public int Width { get; set; }
+
+        [JsonPropertyName("height")]
+        public int Height { get; set; }
+
+        [JsonPropertyName("totalBitrate")]
+        public int TotalBitrate { get; set; }
     }
 }

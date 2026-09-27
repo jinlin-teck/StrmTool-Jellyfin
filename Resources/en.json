@@ -33,5 +33,9 @@
   "StrmTool.LblMetadataRestoreTimeout": "Metadata restore timeout",
   "StrmTool.DescMetadataRestoreTimeout": "Maximum time to wait for metadata restoration when strm file size is reset (1-30 minutes)",
   "StrmTool.UnitMs": "ms",
-  "StrmTool.UnitMinutes": "min"
+  "StrmTool.UnitMinutes": "min",
+  "StrmTool.ExportTaskName": "Export Strm Media Info Cache",
+  "StrmTool.ExportTaskDescription": "Exports existing media info of strm files into local .strmtool.json cache files without remote probing.",
+  "StrmTool.RestoreTaskName": "Restore Strm Media Info from Cache",
+  "StrmTool.RestoreTaskDescription": "Restores media streams and metadata for strm files from valid .strmtool.json cache files without remote probing."
 }

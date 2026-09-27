@@ -80,23 +80,11 @@ namespace StrmTool
                     return;
                 }
 
-                var item = e.Item;
-                var fileName = Path.GetFileNameWithoutExtension(item.Path);
-
-                // 检查是否有缓存
-                if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData))
-                {
-                    return;
-                }
-
-                if (!NeedsRestore(item, cacheData))
-                {
-                    return;
-                }
+                var fileName = Path.GetFileNameWithoutExtension(e.Item.Path);
 
                 // 原子性地检查并标记为正在恢复，防止竞态条件
                 // 同时作为任务跟踪键，避免同一 item 创建多个任务
-                var taskKey = item.Id;
+                var taskKey = e.Item.Id;
 
                 // 先注册完成信号，再启动真正的异步任务，保证去重和 Dispose 等待覆盖整个恢复过程。
                 var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -115,7 +103,8 @@ namespace StrmTool
 
                 try
                 {
-                    _ = Task.Run(() => RestoreItemMetadataAsync(taskKey, fileName, completion));
+                    // 缓存校验涉及磁盘 I/O，挪到后台执行，避免阻塞 Jellyfin 库事件线程
+                    _ = Task.Run(() => EvaluateRestoreAsync(taskKey, fileName, completion));
                 }
                 catch
                 {
@@ -130,19 +119,58 @@ namespace StrmTool
             }
         }
 
-        private static bool NeedsRestore(BaseItem item, MediaInfoCacheData cacheData)
+        /// <summary>
+        /// 后台评估是否需要恢复元数据：读取缓存（磁盘 I/O）并校验，命中后才执行恢复。
+        /// </summary>
+        private async Task EvaluateRestoreAsync(Guid taskKey, string fileName, TaskCompletionSource<bool> completion)
         {
-            return IsSizeReset(item, cacheData)
-                || (cacheData.RunTimeTicks.HasValue && !item.RunTimeTicks.HasValue)
-                || (!string.IsNullOrEmpty(cacheData.Container) && string.IsNullOrEmpty(item.Container));
+            try
+            {
+                if (_isDisposed)
+                {
+                    return;
+                }
+
+                RefreshConfig();
+                var config = _config;
+                if (config == null || !config.EnableMediaInfoCache || config.ForceRefreshIgnoreCache)
+                {
+                    return;
+                }
+
+                // 排队期间 item、路径或缓存都可能变化；重新获取后再校验
+                var item = _libraryManager.GetItemById(taskKey);
+                if (item == null || !StrmMediaInfoService.IsStrmFile(item.Path))
+                {
+                    _logger.LogDebug("Item {Name} is no longer available for restore", fileName);
+                    return;
+                }
+
+                if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) ||
+                    !StrmMediaInfoService.NeedsRestore(item, cacheData))
+                {
+                    return;
+                }
+
+                await RestoreItemMetadataAsync(taskKey, fileName).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogDebug("Restore evaluation cancelled for {Name}", fileName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error evaluating restore for {Name}", fileName);
+            }
+            finally
+            {
+                // 整个评估/恢复过程仅由这一层释放去重记录，避免误删后续任务。
+                _runningTasks.TryRemove(taskKey, out _);
+                completion.TrySetResult(true);
+            }
         }
 
-        private static bool IsSizeReset(BaseItem item, MediaInfoCacheData cacheData)
-        {
-            return cacheData.Size > 0 && item.Size < cacheData.Size / 10;
-        }
-
-        private async Task RestoreItemMetadataAsync(Guid taskKey, string fileName, TaskCompletionSource<bool> completion)
+        private async Task RestoreItemMetadataAsync(Guid taskKey, string fileName)
         {
             try
             {
@@ -169,7 +197,8 @@ namespace StrmTool
                     return;
                 }
 
-                if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) || !NeedsRestore(item, cacheData))
+                if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) ||
+                    !StrmMediaInfoService.NeedsRestore(item, cacheData))
                 {
                     return;
                 }
@@ -179,25 +208,13 @@ namespace StrmTool
 
                 // 恢复元数据（只保留前端显示和 Jellyfin 内部需要的字段）
                 // 注意：Jellyfin 不会重置媒体流信息，因此不需要恢复 MediaStreams
-                if (IsSizeReset(item, cacheData))
+                if (StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData))
                 {
-                    item.Size = cacheData.Size;
+                    // 持久化修改
+                    await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cts.Token).ConfigureAwait(false);
+
+                    _logger.LogInformation("Successfully restored metadata for {Name}", fileName);
                 }
-
-                if (cacheData.RunTimeTicks.HasValue && !item.RunTimeTicks.HasValue)
-                {
-                    item.RunTimeTicks = cacheData.RunTimeTicks;
-                }
-
-                if (!string.IsNullOrEmpty(cacheData.Container) && string.IsNullOrEmpty(item.Container))
-                {
-                    item.Container = cacheData.Container;
-                }
-
-                // 持久化修改
-                await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cts.Token).ConfigureAwait(false);
-
-                _logger.LogInformation("Successfully restored metadata for {Name}", fileName);
             }
             catch (OperationCanceledException)
             {
@@ -206,11 +223,6 @@ namespace StrmTool
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to restore metadata for {Name}", fileName);
-            }
-            finally
-            {
-                _runningTasks.TryRemove(taskKey, out _);
-                completion.TrySetResult(true);
             }
         }
 
