@@ -439,9 +439,38 @@ namespace StrmTool
                 await ProbeAndCacheAsync(item, cancellationToken).ConfigureAwait(false);
             }
 
+            // SaveMediaStreams 不会触发 ItemUpdated 事件，Size 等元数据必须在此就地回写，
+            // 否则界面上的大小会一直停留在 strm 物理文件大小，直到播放或其他更新事件才被监听器恢复
+            await RestoreMetadataFromCacheAsync(item, logPrefix, cancellationToken).ConfigureAwait(false);
+
             cancellationToken.ThrowIfCancellationRequested();
             var afterStreams = _mediaInfoService.GetItemMediaStreams(item);
             return (beforeStreams, afterStreams, !loadedFromCache);
+        }
+
+        /// <summary>
+        /// 探测/缓存命中后立即从缓存回写 Size 等元数据并持久化。
+        /// 与 ItemUpdateListener 的恢复逻辑一致：仅在字段缺失或被重置时修改，
+        /// UpdateToRepositoryAsync 触发的 ItemUpdated 事件会被监听器判定为无需恢复，不会循环。
+        /// </summary>
+        private async Task RestoreMetadataFromCacheAsync(BaseItem item, string logPrefix, CancellationToken cancellationToken)
+        {
+            if (!_config.EnableMediaInfoCache || _config.ForceRefreshIgnoreCache)
+            {
+                return;
+            }
+
+            if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) ||
+                !StrmMediaInfoService.NeedsRestore(item, cacheData))
+            {
+                return;
+            }
+
+            if (StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData))
+            {
+                await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation("{Prefix} - Restored metadata for {Name} (Size={Size})", logPrefix, item.Name, cacheData.Size);
+            }
         }
 
         private async Task<bool> ProcessSingleItemAsync(BaseItem item, CancellationToken cancellationToken)
