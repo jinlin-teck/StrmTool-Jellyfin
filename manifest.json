@@ -13,8 +13,8 @@
         "changelog": "Release v2.5.0",
         "targetAbi": "12.1.0.0",
         "sourceUrl": "https://github.com/jinlin-teck/StrmTool-Jellyfin/releases/download/v2.5.0/StrmTool_2.5.0.0.zip",
-        "checksum": "4cb6a22349c0704afe0518641a23f380",
-        "timestamp": "2026-09-27T14:02:03Z"
+        "checksum": "36d497ae9e6117796eaa6b0f8514e173",
+        "timestamp": "2026-09-27T14:25:26Z"
       }
     ]
   }
