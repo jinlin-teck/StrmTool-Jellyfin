@@ -1,119 +1,121 @@
 # StrmTool for Jellyfin
 
-Jellyfin 插件，用于从 strm 文件中提取媒体技术信息（codec、分辨率、字幕），加速 strm 媒体文件的起播速度。
+[English Documentation (README_EN.md)](./README_EN.md)
 
-> **推荐搭配**：如果你还需要从 OpenList/Alist 网盘批量生成 strm 文件，可参考本人另外一个项目：[openlist-strm](https://github.com/jinlin-teck/openlist-strm)——从 OpenList/Alist 目录生成 .strm 文件的轻量服务，带 WebUI，配合本插件可在 Jellyfin 上完美播放 strm 媒体文件。
+**StrmTool** 是一款专为 Jellyfin 打造的 `.strm` 媒体增强插件。它通过预提取媒体技术信息（视频编码、分辨率、HDR、音轨、字幕等）、本地持久化缓存、元数据防重置保护以及 `.strm` 音乐直连播放支持，大幅提升网盘/远程流媒体的媒体库展示效果与点播起播速度。
 
-**v2.5.0**：新增缓存导出/恢复计划任务、数据库化库扫描、STRM 封装音乐播放与外挂歌词支持，并增强缓存并发安全、字幕路径恢复和任务取消处理。
-
-## 核心功能
-
-1. **媒体信息提前提取**：在 strm 文件入库后立即向远程服务器请求并获取媒体技术信息（音视频编码、分辨率、字幕等）
-2. **自动提取新文件**：新入库的 strm 文件可开启功能后自动在后台提取媒体信息，无需手动介入
-3. **媒体信息缓存**：自动缓存提取的媒体信息为同名 `.strmtool.json` 文件（保存在 strm 文件同目录下），下次提取时可直接导入；默认启用 STRM 内容指纹校验，strm 内容变化后缓存自动失效并重新探测
-4. **STRM 音乐播放与外挂歌词支持**：自动修正 Jellyfin 对 `.strm` 音频条目缺失 `ShortcutPath` 媒体源替换的问题，支持浏览器与客户端直接播放 `.strm` 音乐并自动关联同目录同名 `.lrc`/`.elrc`/`.txt` 歌词文件
-5. **计划任务支持**：提供提取、导出缓存和从缓存恢复三个计划任务，支持手动触发和定时执行
-6. **配置界面**：提供插件设置页面，可调整自动提取开关、刷新延迟时间、持久化缓存开关和最大并发数以及强制刷新策略
-
-本版本面向 Jellyfin 12.1.0，使用 .NET 10 构建；不声明兼容 Jellyfin 10.11.x 或其他版本。
-
-## 安装方法
-
-1. 在 Jellyfin 的 `plugin` 目录下新建文件夹 `StrmTool`
-2. 将编译生成的 `StrmTool.dll` 放入该文件夹
-3. 重启 Jellyfin 服务
-
-## 使用方法
-
-### 插件功能设置
-
-在插件详情页点击"设置"按钮，可以调整以下配置项：
-
-- **自动提取新入库 strm 文件**：启用后，新增的 strm 文件会自动在后台执行媒体信息提取（默认：启用）
-- **启用媒体信息缓存**：启用后，提取的媒体信息会保存为 xxx.strmtool.json 文件（与 strm 文件同目录），避免重复探测（默认：启用）
-- **校验 STRM 内容指纹**：启用时，当 strm 文件指向的链接变动时旧缓存自动失效并重新探测；仅在网盘/NAS 路径迁移且确认媒体文件未变时关闭，以复用旧缓存。关闭后读取不会改写缓存或指纹，重新启用时指纹缺失或不匹配的缓存仍会失效并重新探测（默认：启用）
-- **刷新延迟（毫秒）**：每次刷新媒体信息后等待的毫秒数，用于避免对远程服务器造成压力（默认：1000ms）
-- **最大并发数（需重启生效）**：媒体信息提取任务的最大并发数，范围: 1-50（默认：5）。修改后需要重启 Jellyfin 才能生效。
-- **强制刷新选项**：
-  - **无视是否已有媒体流**：勾选后无论是否已有媒体信息都执行刷新（仍可利用缓存）
-  - **无视缓存**：勾选后直接从远程服务器获取，忽略缓存文件（仍会判断是否已有媒体信息）
-
-**注意**：除"最大并发数"外，其他配置修改后会立即生效（在下次任务执行时自动应用），无需重启 Jellyfin。
-
-### 计划任务
-
-1. 进入 Jellyfin 后台 → 计划任务
-2. 找到 `Strm Tool` 分类下的`Extract Strm Media Info`（提取Strm媒体信息）任务
-3. 可手动运行或设置定时触发
-4. 提取任务通过设置页的强制刷新选项控制探测和缓存利用策略。
-5. **导出Strm媒体信息缓存**：仅为尚无缓存的条目保存库内媒体信息，不访问远程媒体，也不覆盖任何已有缓存（包括指纹失效或损坏的缓存）。运行前请确认库内信息对应当前媒体源；源已变更时应先运行提取任务重新探测，不应通过删除缓存后导出来更新指纹。
-6. **从缓存恢复Strm媒体信息**：从有效缓存恢复缺失的媒体流和元数据，不访问远程媒体；禁用缓存或启用“无视缓存”时不执行。这两个新任务默认没有自动触发器。
-
-## 注意事项
-
-- 请根据使用的 Jellyfin 版本选择对应版本的插件
-- v1.0.0.3 相比之前版本不会调用任何第三方元数据服务，已有的元数据（标题、描述、海报等）不会被修改
-- 媒体信息缓存文件格式为 `strm_filename.strmtool.json`，位于 strm 文件同目录
-- 本地外部字幕仅缓存与 strm 同目录的文件名，读取时还原绝对路径；不修改库中原始字幕对象。其他目录的本地字幕不写入新缓存，需由 Jellyfin 重新扫描发现；远程字幕 URL 保留
-- 默认通过 STRM 内容指纹校验缓存有效性；关闭校验会跳过媒体源变更检查，请确认媒体未变。读取不会迁移指纹，重新启用后仍按原指纹校验
+> **当前版本**：`v2.5.0`（适用 **Jellyfin 12.1.0** / .NET 10）
+>
+> **推荐搭配**：如果你还需要从 OpenList / Alist 网盘批量生成 `.strm` 文件，推荐搭配本人的另一个开源项目 [openlist-strm](https://github.com/jinlin-teck/openlist-strm)（带 WebUI 的轻量级 `.strm` 生成服务），在 Jellyfin 上获得完整的流媒体播放体验。
 
 ---
 
-# StrmTool for Jellyfin
+## ✨ 核心功能
 
-Jellyfin plugin for extracting media technical information (codec, resolution, subtitles) from strm files to accelerate playback startup speed.
+### 1. 🚀 媒体信息预提取与极速起播
+- **入库即提取**：新 `.strm` 文件入库后自动在后台提取音视频编码、分辨率、帧率、码率、音频通道及内封/外挂字幕，详情页立即展示完整的媒体规格标签（如 `4K`、`HEVC`、`Dolby Vision`、`Atmos`）。
+- **起播加速**：播放前无需等待 Jellyfin 临时拉起 FFprobe 探测远程流，点播即可秒开。
+- **全类型覆盖**：支持电影、剧集、音乐视频（MusicVideo）以及音频（Audio）类型的 `.strm` 文件。
+- **安全无侵入**：仅调用底层接口提取媒体流与技术规格，**绝不触碰**标题、简介、演员、海报等刮削元数据。
 
-> **Recommended companion**: If you also need to batch-generate strm files from OpenList/Alist, check out my other project: [openlist-strm](https://github.com/jinlin-teck/openlist-strm) — a lightweight service with WebUI that generates .strm files from OpenList/Alist directories. Combined with this plugin, you can play strm media files perfectly on Jellyfin.
+### 2. 💾 本地智能缓存与内容指纹校验
+- **同目录缓存**：提取成功后自动在 `.strm` 同目录下生成同名 `{filename}.strmtool.json` 缓存文件。后续刷新或重装媒体库时直接秒级导入，避免重复请求网盘触发风控限流。
+- **STRM 内容指纹校验**：默认校验 `.strm` 文件内容的 SHA256 指纹。当 `.strm` 内的链接更换为新片源时，旧缓存会自动失效并重新探测，确保展示的技术参数与实际片源一致。
+- **坏缓存自动自愈**：遇到损坏或格式无效的缓存文件时，自动将其重命名为 `.bak` 隔离并在后续任务中重新生成，不会阻塞任务执行。
 
-**v2.5.0**: Adds cache export/restoration tasks, database-backed library scanning, and STRM audio playback with external lyric support, along with safer concurrent cache access, subtitle path restoration, and task cancellation handling.
+### 3. 🛡️ 元数据防重置与自动恢复
+- **解决文件大小变回几十字节痛点**：Jellyfin 在播放或刷新 `.strm` 时，往往会将媒体文件大小（Size）重置为本地 `.strm` 文本文件的大小（几十字节），或丢失分辨率、码率等信息。
+- **后台无感恢复**：插件实时监听条目更新事件，一旦检测到文件大小、时长、容器、分辨率或码率被异常重置，会自动从本地 `.strmtool.json` 缓存中无感恢复真实数据。
 
-## Core Features
+### 4. 🎵 STRM 音乐直连播放与外挂歌词
+- **修复音频播放缺陷**：修复 Jellyfin 原生未对音频类 `.strm` 替换远程目标地址、导致网页端与客户端把 `.strm` 文本当成音频流而无法播放的问题。
+- **起播免重复探测**：已提取过音频流信息的 `.strm` 音乐在点播时自动跳过重复的 `FullRefresh` 远端探测，切歌更流畅。
+- **外挂歌词自动关联**：自动扫描并挂载 `.strm` 同目录下同名的 `.lrc`、`.elrc`、`.txt` 外挂歌词文件；当本地歌词文件增删时支持自动更新与清理。
 
-1. **Early Media Information Extraction**: Immediately requests and obtains media technical information (audio/video codec, resolution, subtitles, etc.) from remote servers after strm files are added to the library
-2. **Automatic Extraction for New Files**: Newly added strm files can automatically extract media information in the background when the feature is enabled, no manual intervention required
-3. **Media Information Caching**: Automatically caches extracted media information as `.strmtool.json` files with the same name (saved in the same directory as the strm file), allowing direct import during next extraction; STRM content fingerprint validation is enabled by default, invalidating the cache and triggering re-probing when the strm content changes
-4. **STRM Audio Playback & Lyric Support**: Fixes Jellyfin's missing `ShortcutPath` media source replacement for `.strm` audio items, enabling direct playback of `.strm` music in browsers/clients and automatically associating same-directory `.lrc`/`.elrc`/`.txt` lyric files
-5. **Scheduled Task Support**: Provides extraction, cache export, and cache restoration tasks with manual or scheduled execution
-6. **Configuration Interface**: Provides a plugin settings page to adjust automatic extraction toggle, refresh delay, persistent cache toggle, maximum concurrency, and force refresh strategies
+### 5. 📦 批量缓存导出与离线恢复任务
+- 提供独立的**导出缓存**与**从缓存恢复**计划任务（纯本地磁盘操作，零远程网络请求），方便老媒体库建立初始缓存，或在迁移、重建媒体库后秒级恢复所有媒体技术信息。
 
-This version targets Jellyfin 12.1.0 and is built with .NET 10. Compatibility with Jellyfin 10.11.x or other versions is not claimed.
+---
 
-## Installation
+## 📦 安装方法
 
-1. Create a new folder `StrmTool` in Jellyfin's `plugin` directory
-2. Place the compiled `StrmTool.dll` into this folder
-3. Restart the Jellyfin service
+> ⚠️ **版本要求**：当前版本（`v2.5.0`）专为 **Jellyfin 12.1.0**（基于 .NET 10）构建，不兼容 Jellyfin 10.11.x 或更早版本。请根据你的 Jellyfin 服务端版本下载对应版本的插件。
 
-## Usage
+1. 进入 Jellyfin 配置目录下的插件文件夹（例如 Docker 环境通常为 `/config/plugins`），新建文件夹 `StrmTool`。
+2. 将 `StrmTool.dll` 放入 `StrmTool` 文件夹中。
+3. 重启 Jellyfin 服务。
+4. 进入 **控制台 → 插件**，看到 `StrmTool` 即表示安装成功。
 
-### Plugin Settings
+---
 
-Click the "Settings" button on the plugin details page to adjust the following configuration items:
+## ⚙️ 插件设置说明
 
-- **Automatically extract media info for new strm files**: When enabled, newly added strm files will automatically perform media information extraction in the background (Default: Enabled)
-- **Enable media info caching**: When enabled, extracted media information will be saved as xxx.strmtool.json files (in the same directory as the strm file) to avoid repeated probing (Default: Enabled)
-- **Verify STRM content fingerprint**: When enabled, URL changes invalidate the cache and trigger re-probing. Disable only after confirming the media is unchanged during a NAS/cloud drive path move. Cache reads do not modify the cache or its fingerprint; re-enabling validation rejects missing or mismatched fingerprints and triggers re-probing (Default: Enabled)
-- **Refresh delay (ms)**: Milliseconds to wait after each media info refresh to avoid overwhelming remote servers (Default: 1000ms)
-- **Maximum concurrent extractions (restart required)**: Maximum concurrency for media info extraction tasks, range: 1-50 (Default: 5). Requires Jellyfin restart to take effect.
-- **Force Refresh Options**:
-  - **Ignore existing media streams**: When enabled, will always execute refresh regardless of whether media stream info already exists (cache can still be used)
-  - **Ignore cache**: When enabled, will always fetch from remote server directly, ignoring cache files (will still check if media streams exist)
+进入 **Jellyfin 控制台 → 插件 → StrmTool** 打开设置页面。
 
-**Note**: Except for "Maximum concurrent extractions", all other configuration changes take effect immediately (automatically applied on next task execution) without restarting Jellyfin.
+> 💡 **热更新提示**：除 **「最大并发提取数」** 修改后需要重启 Jellyfin 外，其余所有设置点击「保存设置」后立即生效。
 
-### Scheduled Tasks
+### 自动化与缓存
 
-1. Go to Jellyfin admin → Scheduled Tasks
-2. Find the `Extract Strm Media Info` task under the `Strm Tool` category
-3. Can be run manually or set to trigger on a schedule
-4. The extraction task uses the force refresh options to control probing and cache usage.
-5. **Export Strm Media Info Cache** only fills missing cache files from library metadata, without remote probing. It never overwrites existing caches, including stale or corrupt ones. Confirm library metadata matches the current source before exporting; after a source change, re-probe rather than deleting the cache and exporting old metadata with a new fingerprint.
-6. **Restore Strm Media Info from Cache** restores missing streams and metadata from valid caches without probing. It does nothing when caching is disabled or cache reads are bypassed. Both new tasks have no default triggers.
+| 配置项 | 默认值 | 功能说明 |
+| :--- | :---: | :--- |
+| **自动提取新入库 strm 文件的媒体信息** | 开启 | 新 `.strm` 文件入库后自动加入后台队列提取媒体信息，无需手动运行计划任务。 |
+| **启用媒体信息本地缓存** | 开启 | 将提取到的媒体流与技术元数据保存为同目录下的 `.strmtool.json` 文件，后续直接复用。 |
+| **校验 STRM 内容指纹** | 开启 | 当 `.strm` 内的链接变动时使旧缓存失效并重新探测。仅在网盘/NAS 挂载路径迁移且确认片源未变时建议临时关闭，以便直接复用旧缓存。 |
 
-## Notes
+### 性能与并发控制
 
-- Please select the corresponding plugin version based on your Jellyfin version
-- Compared to previous versions, v1.0.0.3 does not call any third-party metadata services, and existing metadata (title, description, posters, etc.) will not be modified
-- Media info cache file format is `strm_filename.strmtool.json`, located in the same directory as the strm file
-- Local external subtitles in the STRM directory are cached as filenames and restored to absolute paths on read, without mutating the original stream objects. Local subtitles in other directories are omitted from new caches and must be rediscovered by Jellyfin; remote subtitle URLs are preserved
-- STRM content fingerprint validation is enabled by default. Disabling it bypasses source-change checks, so confirm the media is unchanged. Reads do not migrate fingerprints; re-enabling validation checks the original fingerprint
+| 配置项 | 默认值 | 范围 | 功能说明 |
+| :--- | :---: | :---: | :--- |
+| **提取延迟间隔** | `1000` ms | `0 - 20000` ms | 每次完成远程探测后等待的毫秒数，用于平滑请求节奏，防止触发网盘/WebDAV 高频风控（命中本地缓存时不延迟）。 |
+| **元数据恢复超时限制** | `5` min | `1 - 30` min | 当检测到 `.strm` 文件大小等元数据被重置时，后台恢复任务的最大等待超时时间。 |
+| **最大并发提取数** | `5` | `1 - 50` | 后台同时执行媒体信息提取的最大并发任务数（**修改后需重启 Jellyfin 生效**）。 |
+
+### 强制刷新选项（维护与排障专用）
+
+> ⚠️ **谨慎开启**：强制刷新会显著增加远程网络探测请求，可能触发网盘限流，日常使用请保持关闭，仅在维护或数据异常修复时临时开启。
+
+| 配置项 | 默认值 | 功能说明 |
+| :--- | :---: | :--- |
+| **无视是否已有媒体流** | 关闭 | 即使库中已记录音视频流信息，仍然执行刷新流程（若开启缓存且缓存有效，仍会优先使用本地缓存）。 |
+| **无视缓存强制远端探测** | 关闭 | 忽略本地 `.strmtool.json` 缓存文件，直接连接远程服务器重新探测并覆盖缓存（默认仅针对缺失媒体流的条目生效；若需全库强制重探，请同时开启上面一项）。 |
+
+---
+
+## 🕒 计划任务指南
+
+进入 **Jellyfin 控制台 → 计划任务**，在 **`StrmTool`** 分类下可使用以下三个任务（默认均无自动定时触发器，可按需手动运行或自行添加定时计划）：
+
+| 任务名称 | 是否请求远程网络 | 适用场景与行为说明 |
+| :--- | :---: | :--- |
+| **提取Strm媒体信息** (`Extract Strm Media Info`) | 按需请求（优先读缓存） | **主力任务**。全库扫描缺失媒体信息或缓存指纹已失效的 `.strm` 条目：若有有效本地缓存则直接秒级导入；若无缓存则发起远程探测并生成缓存。建议可配置为每日凌晨定时运行作为兜底。 |
+| **导出Strm媒体信息缓存** (`Export Strm Media Info Cache`) | **否**（纯本地操作） | **老库生成缓存**。将库中已经具备媒体信息、但本地尚无 `.strmtool.json` 的条目批量导出为缓存文件。不会覆盖任何已有缓存。 |
+| **从缓存恢复Strm媒体信息** (`Restore Strm Media Info from Cache`) | **否**（纯本地操作） | **迁移/重建秒恢复**。扫描全库，利用有效的 `.strmtool.json` 缓存批量恢复缺失的音视频流、文件大小、分辨率、时长、码率及本地外挂歌词。 |
+
+---
+
+## 💡 常见使用场景指南
+
+### 场景一：全新安装与日常使用
+保持插件默认设置即可。新入库的 `.strm` 影片和音乐会自动在后台提取媒体信息并生成 `.strmtool.json` 缓存；日常播放或刮削导致文件大小被重置时，插件也会在后台自动恢复。
+
+### 场景二：已有大量已探测影片的老媒体库首次使用本插件
+1. 先运行一次 **「导出Strm媒体信息缓存」** 任务，将 Jellyfin 数据库里已有的媒体流信息批量生成 `.strmtool.json` 本地缓存（全程零网络请求）。
+2. 再运行一次 **「提取Strm媒体信息」** 任务，为剩余尚未探测过的 `.strm` 影片补齐媒体信息与缓存。
+
+### 场景三：重建媒体库、重装 Jellyfin 或更换挂载路径
+- **路径与链接均未变**：只要保留影片目录下的 `.strmtool.json` 文件，在新库扫描完成后运行 **「从缓存恢复Strm媒体信息」**（或「提取Strm媒体信息」），即可在不请求网盘的情况下秒级恢复全库媒体信息。
+- **更换了网盘域名/挂载路径，但实际媒体文件未变**：
+  1. 在插件设置中**关闭「校验 STRM 内容指纹」**并保存。
+  2. 运行 **「从缓存恢复Strm媒体信息」** 任务，直接复用旧缓存恢复全库信息。
+  3. *（注意：关闭校验期间读取缓存不会改写缓存内的旧指纹；若日后重新开启指纹校验，指纹不匹配的条目仍会触发重新探测。）*
+
+---
+
+## 📌 注意事项与常见问题
+
+1. **外挂字幕与外置音轨会丢失吗？**
+   - 不会。插件在提取或从缓存恢复媒体流时，会自动合并并保留库中已发现的外挂字幕和外置音轨。
+   - 与 `.strm` 位于同一目录的本地外挂字幕及外挂歌词（`.lrc`/`.elrc`/`.txt`）在缓存中仅保存文件名，读取时自动还原为当前目录的绝对路径，方便媒体库整体迁移。
+2. **更换了更高清的片源（如 1080P 换成了 4K），但 `.strm` 文件名没变怎么办？**
+   - 只要开启了「校验 STRM 内容指纹」（默认开启）且 `.strm` 文件内的链接发生了变化，运行「提取Strm媒体信息」任务时会自动识别出指纹不匹配，重新探测新片源并更新分辨率、时长、大小等技术信息。
+   - 若 `.strm` 内写的是固定不变的重定向链接（文件内容未变但后端指向的媒体变了），可临时勾选「无视是否已有媒体流」+「无视缓存强制远端探测」，运行提取任务更新后再关闭这两个选项。
