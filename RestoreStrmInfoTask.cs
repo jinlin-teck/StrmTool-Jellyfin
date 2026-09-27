@@ -64,7 +64,8 @@ namespace StrmTool
 
                 if (hasVideo || hasAudio)
                 {
-                    return StrmMediaInfoService.NeedsRestore(item, cacheData);
+                    return StrmMediaInfoService.NeedsRestore(item, cacheData)
+                        || StrmMediaInfoService.HasMissingLocalLyrics(item, streams);
                 }
 
                 return cacheData.MediaStreams != null && cacheData.MediaStreams.Count > 0;
@@ -103,8 +104,9 @@ namespace StrmTool
             var streams = service.GetItemMediaStreams(item);
             bool hasVideo = streams.Any(s => s.Type == MediaStreamType.Video);
             bool hasAudio = streams.Any(s => s.Type == MediaStreamType.Audio);
+            bool missingLyrics = StrmMediaInfoService.HasMissingLocalLyrics(item, streams);
 
-            if (!hasVideo && !hasAudio && cacheData.MediaStreams != null && cacheData.MediaStreams.Count > 0)
+            if ((!hasVideo && !hasAudio || missingLyrics) && cacheData.MediaStreams != null && cacheData.MediaStreams.Count > 0)
             {
                 await service.SaveMediaStreamsAsync(item, cacheData.MediaStreams, cancellationToken).ConfigureAwait(false);
                 changed = true;

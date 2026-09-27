@@ -49,6 +49,10 @@ namespace StrmTool
                 _logger.LogInformation("  MaxConcurrentExtract: {Value}", config.MaxConcurrentExtract);
                 _logger.LogInformation("  ForceRefreshIgnoreExisting: {Value}", config.ForceRefreshIgnoreExisting);
                 _logger.LogInformation("  ForceRefreshIgnoreCache: {Value}", config.ForceRefreshIgnoreCache);
+                if (!PluginServiceRegistrator.IsRegistered)
+                {
+                    _logger.LogWarning("IMediaSourceManager decorator was not registered; STRM audio playback support may be inactive");
+                }
             }
             catch (Exception ex)
             {

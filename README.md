@@ -4,15 +4,16 @@ Jellyfin 插件，用于从 strm 文件中提取媒体技术信息（codec、分
 
 > **推荐搭配**：如果你还需要从 OpenList/Alist 网盘批量生成 strm 文件，可参考本人另外一个项目：[openlist-strm](https://github.com/jinlin-teck/openlist-strm)——从 OpenList/Alist 目录生成 .strm 文件的轻量服务，带 WebUI，配合本插件可在 Jellyfin 上完美播放 strm 媒体文件。
 
-**v2.5.0**：新增缓存导出/恢复计划任务、数据库化库扫描，并增强缓存并发安全、字幕路径恢复和任务取消处理。
+**v2.5.0**：新增缓存导出/恢复计划任务、数据库化库扫描、STRM 封装音乐播放与外挂歌词支持，并增强缓存并发安全、字幕路径恢复和任务取消处理。
 
 ## 核心功能
 
 1. **媒体信息提前提取**：在 strm 文件入库后立即向远程服务器请求并获取媒体技术信息（音视频编码、分辨率、字幕等）
 2. **自动提取新文件**：新入库的 strm 文件可开启功能后自动在后台提取媒体信息，无需手动介入
 3. **媒体信息缓存**：自动缓存提取的媒体信息为同名 `.strmtool.json` 文件（保存在 strm 文件同目录下），下次提取时可直接导入；默认启用 STRM 内容指纹校验，strm 内容变化后缓存自动失效并重新探测
-4. **计划任务支持**：提供提取、导出缓存和从缓存恢复三个计划任务，支持手动触发和定时执行
-5. **配置界面**：提供插件设置页面，可调整自动提取开关、刷新延迟时间、持久化缓存开关和最大并发数以及强制刷新策略
+4. **STRM 音乐播放与外挂歌词支持**：自动修正 Jellyfin 对 `.strm` 音频条目缺失 `ShortcutPath` 媒体源替换的问题，支持浏览器与客户端直接播放 `.strm` 音乐并自动关联同目录同名 `.lrc`/`.elrc`/`.txt` 歌词文件
+5. **计划任务支持**：提供提取、导出缓存和从缓存恢复三个计划任务，支持手动触发和定时执行
+6. **配置界面**：提供插件设置页面，可调整自动提取开关、刷新延迟时间、持久化缓存开关和最大并发数以及强制刷新策略
 
 本版本面向 Jellyfin 12.1.0，使用 .NET 10 构建；不声明兼容 Jellyfin 10.11.x 或其他版本。
 
@@ -64,15 +65,16 @@ Jellyfin plugin for extracting media technical information (codec, resolution, s
 
 > **Recommended companion**: If you also need to batch-generate strm files from OpenList/Alist, check out my other project: [openlist-strm](https://github.com/jinlin-teck/openlist-strm) — a lightweight service with WebUI that generates .strm files from OpenList/Alist directories. Combined with this plugin, you can play strm media files perfectly on Jellyfin.
 
-**v2.5.0**: Adds cache export/restoration tasks and database-backed library scanning, with safer concurrent cache access, subtitle path restoration, and task cancellation handling.
+**v2.5.0**: Adds cache export/restoration tasks, database-backed library scanning, and STRM audio playback with external lyric support, along with safer concurrent cache access, subtitle path restoration, and task cancellation handling.
 
 ## Core Features
 
 1. **Early Media Information Extraction**: Immediately requests and obtains media technical information (audio/video codec, resolution, subtitles, etc.) from remote servers after strm files are added to the library
 2. **Automatic Extraction for New Files**: Newly added strm files can automatically extract media information in the background when the feature is enabled, no manual intervention required
 3. **Media Information Caching**: Automatically caches extracted media information as `.strmtool.json` files with the same name (saved in the same directory as the strm file), allowing direct import during next extraction; STRM content fingerprint validation is enabled by default, invalidating the cache and triggering re-probing when the strm content changes
-4. **Scheduled Task Support**: Provides extraction, cache export, and cache restoration tasks with manual or scheduled execution
-5. **Configuration Interface**: Provides a plugin settings page to adjust automatic extraction toggle, refresh delay, persistent cache toggle, maximum concurrency, and force refresh strategies
+4. **STRM Audio Playback & Lyric Support**: Fixes Jellyfin's missing `ShortcutPath` media source replacement for `.strm` audio items, enabling direct playback of `.strm` music in browsers/clients and automatically associating same-directory `.lrc`/`.elrc`/`.txt` lyric files
+5. **Scheduled Task Support**: Provides extraction, cache export, and cache restoration tasks with manual or scheduled execution
+6. **Configuration Interface**: Provides a plugin settings page to adjust automatic extraction toggle, refresh delay, persistent cache toggle, maximum concurrency, and force refresh strategies
 
 This version targets Jellyfin 12.1.0 and is built with .NET 10. Compatibility with Jellyfin 10.11.x or other versions is not claimed.
 

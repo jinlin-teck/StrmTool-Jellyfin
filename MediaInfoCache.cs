@@ -314,7 +314,9 @@ namespace StrmTool
         }
 
         private static bool IsLocalSubtitle(MediaStream stream) =>
-            stream.IsExternal && stream.Type == MediaStreamType.Subtitle && stream.IsExternalUrl != true;
+            ((stream.IsExternal && stream.Type == MediaStreamType.Subtitle) ||
+             (stream.Type == MediaStreamType.Lyric && !string.IsNullOrWhiteSpace(stream.Path)))
+            && stream.IsExternalUrl != true;
 
         private static void RestoreSubtitlePaths(List<MediaStream> streams, string strmPath)
         {

@@ -370,7 +370,7 @@ namespace StrmTool
                             bool hasVideo = mediaStreams.Any(s => s.Type == MediaStreamType.Video);
                             bool hasAudio = mediaStreams.Any(s => s.Type == MediaStreamType.Audio);
 
-                            if (_config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio) || HasInvalidCache(item))
+                            if (_config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio) || HasInvalidCache(item) || StrmMediaInfoService.HasMissingLocalLyrics(item, mediaStreams))
                             {
                                 local.Add(item);
                             }
@@ -533,7 +533,7 @@ namespace StrmTool
                 bool hasVideo = beforeStreams.Any(s => s.Type == MediaStreamType.Video);
                 bool hasAudio = beforeStreams.Any(s => s.Type == MediaStreamType.Audio);
 
-                if (!_config.ForceRefreshIgnoreExisting && (hasVideo || hasAudio) && !HasInvalidCache(item))
+                if (!_config.ForceRefreshIgnoreExisting && (hasVideo || hasAudio) && !HasInvalidCache(item) && !StrmMediaInfoService.HasMissingLocalLyrics(item, beforeStreams))
                 {
                     _logger.LogInformation("{Name} already has media stream info, skipping", fileName);
                     return;

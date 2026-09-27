@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using Microsoft.Extensions.Logging;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
@@ -28,6 +29,7 @@ namespace StrmTool
         public long? RunTimeTicks { get; set; }
         public string Container { get; set; }
         public string StrmContentHash { get; set; }
+        public string TargetPath { get; set; }
         public int Width { get; set; }
         public int Height { get; set; }
         public int TotalBitrate { get; set; }
@@ -155,6 +157,11 @@ namespace StrmTool
         {
             cancellationToken.ThrowIfCancellationRequested();
             var streams = MergeExternalStreams(mediaStreams, GetItemMediaStreams(item));
+            if (item is Audio audio)
+            {
+                LocalLyricLocator.ApplyAudioLyrics(audio, streams, _logger);
+            }
+
             _mediaStreamRepository.SaveMediaStreams(item.Id, streams, cancellationToken);
             if (item is Video video)
             {
@@ -166,6 +173,12 @@ namespace StrmTool
             return streams;
         }
 
+        private static bool IsExternalOrLyricStream(MediaStream stream)
+        {
+            return stream.IsExternal ||
+                   (stream.Type == MediaStreamType.Lyric && !string.IsNullOrWhiteSpace(stream.Path));
+        }
+
         // Repository writes replace the entire stream set. Keep discovered external streams,
         // preferring the current library entry over an older cache entry for the same path.
         // Clone first: assigning external indices must not mutate shared library/cache objects.
@@ -173,9 +186,9 @@ namespace StrmTool
             IEnumerable<MediaStream> incoming, IEnumerable<MediaStream> existing)
         {
             var incomingList = incoming.ToList();
-            var external = existing.Where(s => s.IsExternal)
-                .Concat(incomingList.Where(s => s.IsExternal));
-            var selected = incomingList.Where(s => !s.IsExternal).ToList();
+            var external = existing.Where(IsExternalOrLyricStream)
+                .Concat(incomingList.Where(IsExternalOrLyricStream));
+            var selected = incomingList.Where(s => !IsExternalOrLyricStream(s)).ToList();
             var seenPaths = new HashSet<(MediaStreamType, string)>();
             foreach (var stream in external)
             {
@@ -188,8 +201,8 @@ namespace StrmTool
             }
 
             var result = JsonSerializer.Deserialize<List<MediaStream>>(JsonSerializer.Serialize(selected));
-            int nextIndex = result.Where(s => !s.IsExternal).Select(s => s.Index).DefaultIfEmpty(-1).Max() + 1;
-            foreach (var stream in result.Where(s => s.IsExternal))
+            int nextIndex = result.Where(s => !IsExternalOrLyricStream(s)).Select(s => s.Index).DefaultIfEmpty(-1).Max() + 1;
+            foreach (var stream in result.Where(IsExternalOrLyricStream))
                 stream.Index = nextIndex++;
             return result;
         }
@@ -202,6 +215,11 @@ namespace StrmTool
             item.Width = result.Width;
             item.Height = result.Height;
             item.TotalBitrate = result.TotalBitrate > 0 ? result.TotalBitrate : null;
+            if (!string.IsNullOrWhiteSpace(result.TargetPath) && GetProtocolFromPath(result.TargetPath) != MediaProtocol.File)
+            {
+                item.IsShortcut = true;
+                item.ShortcutPath = result.TargetPath;
+            }
         }
 
         /// <summary>
@@ -262,6 +280,7 @@ namespace StrmTool
                     result.RunTimeTicks = mediaInfo.RunTimeTicks;
                     result.Container = mediaInfo.Container;
                     result.StrmContentHash = strmContentHash;
+                    result.TargetPath = strmContent;
                     result.TotalBitrate = (int)Math.Min(int.MaxValue, mediaInfo.Bitrate.GetValueOrDefault());
 
                     var highestVideoStream = GetHighestResolutionVideoStream(result.MediaStreams);
@@ -312,7 +331,7 @@ namespace StrmTool
         }
 
         /// <summary>
-        /// 判断缓存元数据是否需要恢复（尺寸被重置，或时长/容器/分辨率/码率缺失）
+        /// 判断缓存元数据是否需要恢复（尺寸被重置，或时长/容器/分辨率/码率/歌词标志/Shortcut缺失）
         /// </summary>
         public static bool NeedsRestore(BaseItem item, MediaInfoCacheData cacheData)
         {
@@ -321,7 +340,9 @@ namespace StrmTool
                 || (!string.IsNullOrEmpty(cacheData.Container) && string.IsNullOrEmpty(item.Container))
                 || (cacheData.Width > 0 && item.Width <= 0)
                 || (cacheData.Height > 0 && item.Height <= 0)
-                || (cacheData.TotalBitrate > 0 && item.TotalBitrate.GetValueOrDefault() <= 0);
+                || (cacheData.TotalBitrate > 0 && item.TotalBitrate.GetValueOrDefault() <= 0)
+                || LocalLyricLocator.NeedsLyricMetadataRestore(item, cacheData)
+                || NeedsShortcutRestore(item);
         }
 
         /// <summary>
@@ -330,6 +351,23 @@ namespace StrmTool
         public static bool IsSizeReset(BaseItem item, MediaInfoCacheData cacheData)
         {
             return cacheData.Size > 0 && item.Size.GetValueOrDefault() < cacheData.Size / 10;
+        }
+
+        private static bool NeedsShortcutRestore(BaseItem item)
+        {
+            if (item == null || !IsStrmFile(item.Path))
+            {
+                return false;
+            }
+
+            if (item.IsShortcut && !string.IsNullOrWhiteSpace(item.ShortcutPath))
+            {
+                return false;
+            }
+
+            var targetPath = ReadStrmTargetPath(item.Path);
+            return !string.IsNullOrWhiteSpace(targetPath) &&
+                   GetProtocolFromPath(targetPath) != MediaProtocol.File;
         }
 
         /// <summary>
@@ -376,6 +414,22 @@ namespace StrmTool
                 changed = true;
             }
 
+            if (LocalLyricLocator.TryRestoreLyricMetadataFromCache(item, cacheData))
+            {
+                changed = true;
+            }
+
+            if (item != null && IsStrmFile(item.Path) && (!item.IsShortcut || string.IsNullOrWhiteSpace(item.ShortcutPath)))
+            {
+                var targetPath = ReadStrmTargetPath(item.Path);
+                if (!string.IsNullOrWhiteSpace(targetPath) && GetProtocolFromPath(targetPath) != MediaProtocol.File)
+                {
+                    item.IsShortcut = true;
+                    item.ShortcutPath = targetPath;
+                    changed = true;
+                }
+            }
+
             return changed;
         }
 
@@ -407,6 +461,16 @@ namespace StrmTool
 
         private string ReadStrmSourcePath(string strmFilePath)
         {
+            return ReadStrmTargetPath(strmFilePath, _logger);
+        }
+
+        internal static string ReadStrmTargetPath(string strmFilePath, ILogger logger = null)
+        {
+            if (string.IsNullOrWhiteSpace(strmFilePath) || !File.Exists(strmFilePath))
+            {
+                return string.Empty;
+            }
+
             try
             {
                 foreach (var line in File.ReadLines(strmFilePath))
@@ -417,7 +481,7 @@ namespace StrmTool
                         // 安全验证：检查路径遍历攻击
                         if (MediaInfoCache.ContainsPathTraversal(sourcePath))
                         {
-                            _logger.LogWarning("Potential path traversal attack detected in strm file: {Path}", strmFilePath);
+                            logger?.LogWarning("Potential path traversal attack detected in strm file: {Path}", strmFilePath);
                             return string.Empty;
                         }
                         return sourcePath;
@@ -428,11 +492,188 @@ namespace StrmTool
             }
             catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
             {
-                _logger.LogWarning(ex, "Failed to read strm file: {Path}", strmFilePath);
+                logger?.LogWarning(ex, "Failed to read strm file: {Path}", strmFilePath);
                 return string.Empty;
             }
         }
 
+        public static bool HasMissingLocalLyrics(BaseItem item, IReadOnlyList<MediaStream> currentStreams)
+        {
+            return LocalLyricLocator.HasMissingLocalLyrics(item, currentStreams);
+        }
+    }
 
+    /// <summary>
+    /// 本地同目录外挂歌词定位与 Audio 歌词元数据同步辅助类。
+    /// </summary>
+    internal static class LocalLyricLocator
+    {
+        // 对齐 Jellyfin 核心 Emby.Naming.Common.NamingOptions.LyricFileExtensions，按优先级顺序排列。
+        private static readonly string[] LyricFileExtensions = new[] { ".lrc", ".elrc", ".txt" };
+
+        public static bool HasMissingLocalLyrics(BaseItem item, IReadOnlyList<MediaStream> currentStreams, ILogger logger = null)
+        {
+            if (!(item is Audio))
+            {
+                return false;
+            }
+
+            if (currentStreams != null && currentStreams.Any(s => s.Type == MediaStreamType.Lyric))
+            {
+                return false;
+            }
+
+            return FindLocalLyricFiles(item.Path, logger).Count > 0;
+        }
+
+        public static void ApplyAudioLyrics(Audio audio, List<MediaStream> streams, ILogger logger = null)
+        {
+            if (audio == null || streams == null)
+            {
+                return;
+            }
+
+            // 若音频条目在本地磁盘存在，剔除已不存在的陈旧本地歌词流路径（保留远程歌词或无路径内嵌歌词）
+            if (!string.IsNullOrWhiteSpace(audio.Path) && File.Exists(audio.Path))
+            {
+                streams.RemoveAll(s =>
+                    s != null &&
+                    s.Type == MediaStreamType.Lyric &&
+                    s.IsExternalUrl != true &&
+                    !string.IsNullOrWhiteSpace(s.Path) &&
+                    Path.IsPathRooted(s.Path) &&
+                    !File.Exists(s.Path));
+            }
+
+            var localLyrics = FindLocalLyricFiles(audio.Path, logger);
+            if (!streams.Any(s => s.Type == MediaStreamType.Lyric) && localLyrics.Count > 0)
+            {
+                int nextIndex = streams.Select(s => s.Index).DefaultIfEmpty(-1).Max() + 1;
+                streams.Add(new MediaStream
+                {
+                    Type = MediaStreamType.Lyric,
+                    Path = localLyrics[0],
+                    Index = nextIndex
+                });
+            }
+
+            var lyricPaths = streams
+                .Where(s => s.Type == MediaStreamType.Lyric && !string.IsNullOrWhiteSpace(s.Path))
+                .Select(s => s.Path)
+                .Concat(localLyrics)
+                .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+                .ToArray();
+
+            bool hasLyricStream = streams.Any(s => s.Type == MediaStreamType.Lyric);
+            if (lyricPaths.Length > 0)
+            {
+                audio.LyricFiles = lyricPaths;
+                audio.HasLyrics = true;
+            }
+            else if (audio.LyricFiles != null && audio.LyricFiles.Count > 0)
+            {
+                // 原本记录的本地歌词文件已被移除时同步清空
+                audio.LyricFiles = Array.Empty<string>();
+                audio.HasLyrics = hasLyricStream;
+            }
+            else if (hasLyricStream)
+            {
+                audio.HasLyrics = true;
+            }
+        }
+
+        public static bool NeedsLyricMetadataRestore(BaseItem item, MediaInfoCacheData cacheData)
+        {
+            if (!(item is Audio audio) || cacheData?.MediaStreams == null)
+            {
+                return false;
+            }
+
+            var cachedLyrics = GetExistingCachedLyricPaths(cacheData.MediaStreams);
+            bool hasCachedLyricStream = cachedLyrics.Length > 0 ||
+                cacheData.MediaStreams.Any(s => s != null && s.Type == MediaStreamType.Lyric && string.IsNullOrWhiteSpace(s.Path));
+            if (!hasCachedLyricStream)
+            {
+                return false;
+            }
+
+            if (audio.HasLyrics != true)
+            {
+                return true;
+            }
+
+            return cachedLyrics.Length > 0 && (audio.LyricFiles == null || audio.LyricFiles.Count == 0);
+        }
+
+        public static bool TryRestoreLyricMetadataFromCache(BaseItem item, MediaInfoCacheData cacheData)
+        {
+            if (!NeedsLyricMetadataRestore(item, cacheData) || !(item is Audio audio))
+            {
+                return false;
+            }
+
+            var cachedLyrics = GetExistingCachedLyricPaths(cacheData.MediaStreams);
+            bool changed = false;
+
+            if (audio.HasLyrics != true)
+            {
+                audio.HasLyrics = true;
+                changed = true;
+            }
+
+            if (cachedLyrics.Length > 0 && (audio.LyricFiles == null || audio.LyricFiles.Count == 0))
+            {
+                audio.LyricFiles = cachedLyrics;
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private static string[] GetExistingCachedLyricPaths(IEnumerable<MediaStream> streams)
+        {
+            return streams
+                .Where(s => s != null &&
+                            s.Type == MediaStreamType.Lyric &&
+                            !string.IsNullOrWhiteSpace(s.Path) &&
+                            (s.IsExternalUrl == true || !Path.IsPathRooted(s.Path) || File.Exists(s.Path)))
+                .Select(s => s.Path)
+                .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+                .ToArray();
+        }
+
+        internal static List<string> FindLocalLyricFiles(string strmPath, ILogger logger = null)
+        {
+            var result = new List<string>();
+            if (string.IsNullOrWhiteSpace(strmPath) || !Path.IsPathRooted(strmPath))
+            {
+                return result;
+            }
+
+            try
+            {
+                var directory = Path.GetDirectoryName(strmPath);
+                var baseName = Path.GetFileNameWithoutExtension(strmPath);
+                if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(baseName) || !Directory.Exists(directory))
+                {
+                    return result;
+                }
+
+                foreach (var ext in LyricFileExtensions)
+                {
+                    var candidate = Path.Combine(directory, baseName + ext);
+                    if (File.Exists(candidate))
+                    {
+                        result.Add(candidate);
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
+            {
+                logger?.LogDebug(ex, "Failed to check local lyric files for: {Path}", strmPath);
+            }
+
+            return result;
+        }
     }
 }
