@@ -4,7 +4,7 @@
 
 **StrmTool** is a `.strm` media enhancement plugin built for Jellyfin. By pre-extracting technical media information (video codec, resolution, HDR, audio tracks, subtitles, etc.), persisting local caches, protecting metadata from being reset, and enabling direct playback for `.strm` audio files, it dramatically improves library presentation and playback startup speed for cloud and remote media streams.
 
-> **Current Version**: `v2.5.0` (Targets **Jellyfin 12.1.0** / .NET 10; for Emby servers, see [StrmTool for Emby](https://github.com/jinlin-teck/StrmTool))
+> **Current Version**: `v2.6.0` (Targets **Jellyfin 12.1.0** / .NET 10; for Emby servers, see [StrmTool for Emby](https://github.com/jinlin-teck/StrmTool))
 >
 > **Recommended Companion**: Need to batch-generate `.strm` files from OpenList / Alist cloud drives? Check out my companion project [openlist-strm](https://github.com/jinlin-teck/openlist-strm) — a lightweight `.strm` generator service with WebUI that pairs seamlessly with this plugin.
 
@@ -27,9 +27,10 @@
 - **Fixes the "Tiny File Size" Issue**: When Jellyfin refreshes or plays a `.strm` item, it often resets the item's `Size` to the tiny size of the local `.strm` text file (under 1 KB) or drops resolution and bitrate fields.
 - **Seamless Background Recovery**: Listens for item update events and automatically restores file size, runtime, container, resolution, and bitrate from the local `.strmtool.json` cache whenever a reset is detected.
 
-### 4. 🎵 Direct STRM Music Playback & External Lyrics
+### 4. 🎵 Direct STRM Music Playback, Tag Extraction & External Lyrics
 - **Fixes Native `.strm` Audio Playback**: Resolves Jellyfin's native limitation where `.strm` audio items fail to substitute `ShortcutPath`, allowing web browsers and clients to stream remote `.strm` music tracks directly.
 - **Skips Redundant Playback Probes**: Audio `.strm` items with already-extracted audio streams bypass redundant `FullRefresh` remote probes during playback startup for smoother track switching.
+- **Audio Tag Extraction & Folder Hierarchy Fallback**: Automatically extracts track title, album, artists, album artists, track/disc numbers, year, and genres from remote audio tags, falls back to standard `AlbumArtist/Album/Track` folder and filename conventions when tags are absent or during offline cache restore, and syncs parent album and artist relationships.
 - **Automatic External Lyrics**: Automatically discovers and attaches same-name `.lrc`, `.elrc`, and `.txt` lyric files located in the same folder as the `.strm` audio file, and cleans up stale lyric entries when local files are removed.
 
 ### 5. 📦 Batch Cache Export & Offline Restore Tasks
@@ -39,7 +40,7 @@
 
 ## 📦 Installation
 
-> ⚠️ **Compatibility**: Version `v2.5.0` is built specifically for **Jellyfin 12.1.0** (.NET 10). Compatibility with Jellyfin 10.11.x or earlier versions is not supported. Please choose the plugin build matching your Jellyfin server version.
+> ⚠️ **Compatibility**: Version `v2.6.0` is built specifically for **Jellyfin 12.1.0** (.NET 10). Compatibility with Jellyfin 10.11.x or earlier versions is not supported. Please choose the plugin build matching your Jellyfin server version.
 
 ### Method 1: Install via Jellyfin Plugin Repository (Recommended, Supports Updates)
 

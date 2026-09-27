@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Controller.Persistence;
@@ -107,6 +109,16 @@ namespace StrmTool
                 }
             }
 
+            var audio = item as Audio;
+            bool? audioTagsProbed = audio != null && !StrmMediaInfoService.HasMissingAudioMetadata(audio, LibraryManager)
+                ? true
+                : null;
+            string exportedTitle = audio != null &&
+                                   !string.IsNullOrWhiteSpace(audio.Name) &&
+                                   !string.Equals(audio.Name, Path.GetFileNameWithoutExtension(audio.Path), StringComparison.Ordinal)
+                ? audio.Name
+                : null;
+
             bool saved = await cache.SaveFullCacheAsync(
                 item.Path,
                 streams,
@@ -118,7 +130,16 @@ namespace StrmTool
                 height: height,
                 totalBitrate: item.TotalBitrate.GetValueOrDefault(),
                 cancellationToken: cancellationToken,
-                onlyIfMissing: true).ConfigureAwait(false);
+                onlyIfMissing: true,
+                audioTagsProbed: audioTagsProbed,
+                title: exportedTitle,
+                album: audio?.Album,
+                artists: audio?.Artists,
+                albumArtists: audio?.AlbumArtists,
+                trackNumber: audio?.IndexNumber,
+                discNumber: audio?.ParentIndexNumber,
+                productionYear: audio?.ProductionYear,
+                genres: audio?.Genres).ConfigureAwait(false);
 
             if (saved)
                 Logger.LogInformation("{Name}: media info exported to cache", item.Name);

@@ -341,6 +341,264 @@ public sealed class MediaInfoServiceTests
         Assert.Same(video, Assert.Single(service.GetAllStrmItems(CancellationToken.None)));
     }
 
+    [Fact]
+    public async Task AudioProbeExtractsTagsSyncsParentAlbumAndUpgradesLegacyCache()
+    {
+        string rootDir = Path.Combine(Path.GetTempPath(), "strmtool-audio-tags-" + Guid.NewGuid().ToString("N"));
+        string artistDir = Path.Combine(rootDir, "卓依婷");
+        string albumDir = Path.Combine(artistDir, "皇牌影视金曲1");
+        Directory.CreateDirectory(albumDir);
+        try
+        {
+            string strmPath = Path.Combine(albumDir, "卓依婷 - 婉君.strm");
+            File.WriteAllText(strmPath, "https://example.invalid/music/wanjun.mp3");
+
+            var artistEntity = new MusicArtist { Id = Guid.NewGuid(), Name = "卓依婷", Path = artistDir };
+            var albumEntity = new TestMusicAlbum
+            {
+                Id = Guid.NewGuid(),
+                ParentId = artistEntity.Id,
+                Name = "皇牌影视金曲1",
+                Path = albumDir
+            };
+            var audio = new TestAudio
+            {
+                Id = Guid.NewGuid(),
+                ParentId = albumEntity.Id,
+                Name = "卓依婷 - 婉君",
+                Path = strmPath,
+                Streams = new List<MediaStream> { new() { Index = 0, Type = MediaStreamType.Audio, Codec = "mp3" } }
+            };
+
+            // 先写入一份旧版缓存（无 audioTagsProbed 和艺术家字段）
+            var cache = new MediaInfoCache(NullLogger.Instance);
+            await cache.SaveFullCacheAsync(strmPath, audio.Streams, 10312071, 2549812250, "mp3", totalBitrate: 323539);
+
+            int probeCalls = 0;
+            var mediaInfo = new MediaInfo
+            {
+                Name = "婉君",
+                Album = "皇牌影视金曲1",
+                Artists = new[] { "卓依婷" },
+                AlbumArtists = new[] { "卓依婷" },
+                IndexNumber = 3,
+                ProductionYear = 2010,
+                Genres = new[] { "Blues" },
+                Size = 10312071,
+                RunTimeTicks = 2549812250,
+                Container = "mp3",
+                Bitrate = 323539,
+                MediaStreams = new List<MediaStream> { new() { Index = 0, Type = MediaStreamType.Audio, Codec = "mp3" } }
+            };
+
+            var peopleByItem = new Dictionary<Guid, List<PersonInfo>>();
+            var itemsById = new Dictionary<Guid, BaseItem>
+            {
+                [artistEntity.Id] = artistEntity,
+                [albumEntity.Id] = albumEntity,
+                [audio.Id] = audio
+            };
+
+            var encoder = Proxy<IMediaEncoder>((method, args) =>
+            {
+                probeCalls++;
+                return Task.FromResult(mediaInfo);
+            });
+            var repository = Proxy<IMediaStreamRepository>((method, args) =>
+            {
+                audio.Streams = ((IReadOnlyList<MediaStream>)args[1]).ToList();
+                return null;
+            });
+            var library = Proxy<ILibraryManager>((method, args) =>
+            {
+                switch (method.Name)
+                {
+                    case nameof(ILibraryManager.GetItemById):
+                        return itemsById.TryGetValue((Guid)args[0], out var found) ? found : null;
+                    case nameof(ILibraryManager.UpdatePeople):
+                        peopleByItem[((BaseItem)args[0]).Id] = ((List<PersonInfo>)args[1]).ToList();
+                        return null;
+                    case nameof(ILibraryManager.GetArtist):
+                        return artistEntity;
+                    default:
+                        return null;
+                }
+            });
+
+            // 即使 ForceRefreshIgnoreExisting=false 且已有旧版缓存与音频流，因缺失艺术家且旧缓存未探测过音频标签，应自动探测并升级缓存
+            using var task = new ExtractHarness(library, encoder, repository, cacheEnabled: true, ignoreCache: false, ignoreExisting: false);
+            await task.ExtractSingleItemAsync(audio, CancellationToken.None);
+
+            Assert.Equal(1, probeCalls);
+            Assert.Equal("婉君", audio.Name);
+            Assert.Equal("皇牌影视金曲1", audio.Album);
+            Assert.Equal(new[] { "卓依婷" }, audio.Artists);
+            Assert.Equal(new[] { "卓依婷" }, audio.AlbumArtists);
+            Assert.Equal(3, audio.IndexNumber);
+            Assert.Equal(2010, audio.ProductionYear);
+            Assert.Equal(new[] { "Blues" }, audio.Genres);
+
+            // 父级专辑应自动同步 AlbumArtists / Artists / 年份 / 流派 / People
+            Assert.Equal(new[] { "卓依婷" }, albumEntity.AlbumArtists);
+            Assert.Equal(new[] { "卓依婷" }, albumEntity.Artists);
+            Assert.Equal(2010, albumEntity.ProductionYear);
+            Assert.Equal(new[] { "Blues" }, albumEntity.Genres);
+            Assert.Equal(1, albumEntity.Saves);
+            Assert.True(peopleByItem.ContainsKey(audio.Id));
+            Assert.True(peopleByItem.ContainsKey(albumEntity.Id));
+
+            // 缓存已升级包含音频标签，再次调用 ExtractSingleItemAsync 应直接跳过，不重复探测
+            Assert.True(cache.TryGetFullCache(strmPath, out var upgradedCache));
+            Assert.True(upgradedCache.AudioTagsProbed);
+            Assert.Equal("婉君", upgradedCache.Title);
+            Assert.Equal("皇牌影视金曲1", upgradedCache.Album);
+            Assert.Equal(new[] { "卓依婷" }, upgradedCache.Artists);
+            Assert.Equal(new[] { "卓依婷" }, upgradedCache.AlbumArtists);
+
+            await task.ExtractSingleItemAsync(audio, CancellationToken.None);
+            Assert.Equal(1, probeCalls);
+
+            // 模拟 Jellyfin 重置音频元数据回默认值，测试从缓存恢复
+            audio.Name = "卓依婷 - 婉君";
+            audio.Album = null;
+            audio.Artists = Array.Empty<string>();
+            audio.AlbumArtists = Array.Empty<string>();
+            audio.IndexNumber = null;
+            audio.ProductionYear = null;
+            audio.Genres = Array.Empty<string>();
+
+            Assert.True(StrmMediaInfoService.NeedsRestore(audio, upgradedCache, library));
+            Assert.True(StrmMediaInfoService.TryRestoreMetadataFromCache(audio, upgradedCache, library));
+            Assert.Equal("婉君", audio.Name);
+            Assert.Equal("皇牌影视金曲1", audio.Album);
+            Assert.Equal(new[] { "卓依婷" }, audio.Artists);
+            Assert.Equal(new[] { "卓依婷" }, audio.AlbumArtists);
+            Assert.Equal(3, audio.IndexNumber);
+            Assert.Equal(2010, audio.ProductionYear);
+            Assert.Equal(new[] { "Blues" }, audio.Genres);
+            Assert.False(StrmMediaInfoService.NeedsRestore(audio, upgradedCache, library));
+        }
+        finally
+        {
+            Directory.Delete(rootDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task AudioProbeFallsBackToFolderStructureWhenEmbeddedTagsMissing()
+    {
+        string rootDir = Path.Combine(Path.GetTempPath(), "strmtool-audio-fallback-" + Guid.NewGuid().ToString("N"));
+        string artistDir = Path.Combine(rootDir, "卓依婷");
+        string albumDir = Path.Combine(artistDir, "好春天");
+        Directory.CreateDirectory(albumDir);
+        try
+        {
+            string strmPath = Path.Combine(albumDir, "05 - 卓依婷 - 恭喜发财.strm");
+            File.WriteAllText(strmPath, "https://example.invalid/music/gongxi.mp3");
+
+            var audio = new TestAudio
+            {
+                Id = Guid.NewGuid(),
+                Name = "05 - 卓依婷 - 恭喜发财",
+                Path = strmPath
+            };
+
+            // 远程探测仅返回流信息，无任何内嵌标签
+            var mediaInfo = new MediaInfo
+            {
+                Size = 8000000,
+                RunTimeTicks = 2000000000,
+                Container = "mp3",
+                Bitrate = 320000,
+                MediaStreams = new List<MediaStream> { new() { Index = 0, Type = MediaStreamType.Audio, Codec = "mp3" } }
+            };
+
+            var encoder = Proxy<IMediaEncoder>((method, args) => Task.FromResult(mediaInfo));
+            var repository = Proxy<IMediaStreamRepository>((method, args) =>
+            {
+                audio.Streams = ((IReadOnlyList<MediaStream>)args[1]).ToList();
+                return null;
+            });
+            var service = new StrmMediaInfoService(null, encoder, repository, null, NullLogger.Instance);
+
+            var result = await service.ProbeMediaStreamsAsync(audio, CancellationToken.None);
+
+            Assert.True(result.Success);
+            Assert.Equal("恭喜发财", audio.Name);
+            Assert.Equal("好春天", audio.Album);
+            Assert.Equal(new[] { "卓依婷" }, audio.Artists);
+            Assert.Equal(new[] { "卓依婷" }, audio.AlbumArtists);
+            Assert.Equal(5, audio.IndexNumber);
+        }
+        finally
+        {
+            Directory.Delete(rootDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SyncAudioRelationshipsPreservesExistingNonArtistPeopleAndReportsChangesIdempotently()
+    {
+        var audio = new TestAudio
+        {
+            Id = Guid.NewGuid(),
+            ParentId = Guid.NewGuid(),
+            Name = "婉君",
+            Album = "皇牌影视金曲1",
+            Artists = new[] { "卓依婷" },
+            AlbumArtists = new[] { "卓依婷" }
+        };
+
+        var storedPeople = new List<PersonInfo>
+        {
+            new() { Name = "左宏元", Type = PersonKind.Composer },
+            new() { Name = "琼瑶", Type = PersonKind.Lyricist }
+        };
+
+        int updatePeopleCalls = 0;
+        int getItemByIdCalls = 0;
+        var library = Proxy<ILibraryManager>((method, args) =>
+        {
+            switch (method.Name)
+            {
+                case nameof(ILibraryManager.GetPeople):
+                    return (IReadOnlyList<PersonInfo>)storedPeople.ToList();
+                case nameof(ILibraryManager.UpdatePeople):
+                    updatePeopleCalls++;
+                    storedPeople = ((List<PersonInfo>)args[1]).ToList();
+                    return null;
+                case nameof(ILibraryManager.GetItemById):
+                    getItemByIdCalls++;
+                    return null;
+                default:
+                    return null;
+            }
+        });
+
+        // 轻量筛选 checkParentAlbum=false 时，若单曲自身 Album/Artists/AlbumArtists 已完整，不查询父链
+        Assert.False(StrmMediaInfoService.HasMissingAudioMetadata(audio, library, checkParentAlbum: false));
+        Assert.Equal(0, getItemByIdCalls);
+
+        // 首次同步：即使无父级专辑，单曲 People 新增了 Artist/AlbumArtist 时也应返回 true，并保留原有的 Composer/Lyricist
+        Assert.True(await StrmMediaInfoService.SyncAudioRelationshipsStaticAsync(audio, library, CancellationToken.None));
+        Assert.Equal(1, updatePeopleCalls);
+        Assert.Contains(storedPeople, p => p.Name == "左宏元" && p.Type == PersonKind.Composer);
+        Assert.Contains(storedPeople, p => p.Name == "琼瑶" && p.Type == PersonKind.Lyricist);
+        Assert.Contains(storedPeople, p => p.Name == "卓依婷" && p.Type == PersonKind.AlbumArtist);
+        Assert.Contains(storedPeople, p => p.Name == "卓依婷" && p.Type == PersonKind.Artist);
+
+        // 二次同步：人员已完整，不应重复调用 UpdatePeople 且返回 false
+        Assert.False(await StrmMediaInfoService.SyncAudioRelationshipsStaticAsync(audio, library, CancellationToken.None));
+        Assert.Equal(1, updatePeopleCalls);
+
+        // PopulateProbeResult 在 mediaInfo == null 时不应将 AudioTagsProbed 置为 true
+        var probeResult = new MediaProbeResult();
+        var helperType = typeof(StrmMediaInfoService).Assembly.GetType("StrmTool.AudioMetadataHelper", throwOnError: true);
+        var populateMethod = helperType.GetMethod("PopulateProbeResult", BindingFlags.Public | BindingFlags.Static);
+        populateMethod.Invoke(null, new object[] { audio, null, probeResult, null, null });
+        Assert.Null(probeResult.AudioTagsProbed);
+    }
+
     private static T Proxy<T>(Func<MethodInfo, object[], object> handler) where T : class
     {
         var proxy = DispatchProxy.Create<T, TestProxy>();
@@ -380,12 +638,36 @@ public sealed class MediaInfoServiceTests
         }
     }
 
+    private sealed class TestMusicAlbum : MusicAlbum
+    {
+        public int Saves { get; private set; }
+        public override Task UpdateToRepositoryAsync(ItemUpdateType reason, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            Saves++;
+            return Task.CompletedTask;
+        }
+    }
+
     private sealed class ExtractHarness : ExtractTask
     {
-        public ExtractHarness(ILibraryManager library, IMediaEncoder encoder, IMediaStreamRepository repository, bool cacheEnabled, bool ignoreCache)
+        public ExtractHarness(
+            ILibraryManager library,
+            IMediaEncoder encoder,
+            IMediaStreamRepository repository,
+            bool cacheEnabled,
+            bool ignoreCache,
+            bool ignoreExisting = true)
             : base(library, encoder, repository, null, NullLogger<ExtractTask>.Instance)
         {
-            _config = new PluginConfiguration { EnableAutoExtract = false, EnableMediaInfoCache = cacheEnabled, ForceRefreshIgnoreCache = ignoreCache, ForceRefreshIgnoreExisting = true, RefreshDelayMs = 0 };
+            _config = new PluginConfiguration
+            {
+                EnableAutoExtract = false,
+                EnableMediaInfoCache = cacheEnabled,
+                ForceRefreshIgnoreCache = ignoreCache,
+                ForceRefreshIgnoreExisting = ignoreExisting,
+                RefreshDelayMs = 0
+            };
         }
     }
 }

@@ -378,7 +378,16 @@ namespace StrmTool
             int height = 0,
             int totalBitrate = 0,
             CancellationToken cancellationToken = default,
-            bool onlyIfMissing = false)
+            bool onlyIfMissing = false,
+            bool? audioTagsProbed = null,
+            string title = null,
+            string album = null,
+            IEnumerable<string> artists = null,
+            IEnumerable<string> albumArtists = null,
+            int? trackNumber = null,
+            int? discNumber = null,
+            int? productionYear = null,
+            IEnumerable<string> genres = null)
         {
             var gate = GetCacheLock(strmPath);
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -416,7 +425,16 @@ namespace StrmTool
                     Container = container,
                     Width = width,
                     Height = height,
-                    TotalBitrate = totalBitrate
+                    TotalBitrate = totalBitrate,
+                    AudioTagsProbed = audioTagsProbed,
+                    Title = NormalizeText(title),
+                    Album = NormalizeText(album),
+                    Artists = NormalizeStringList(artists),
+                    AlbumArtists = NormalizeStringList(albumArtists),
+                    TrackNumber = trackNumber,
+                    DiscNumber = discNumber,
+                    ProductionYear = productionYear,
+                    Genres = NormalizeStringList(genres)
                 };
 
                 var json = JsonSerializer.Serialize(cache, JsonOptions);
@@ -491,6 +509,32 @@ namespace StrmTool
             }
         }
 
+        internal static string NormalizeText(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        }
+
+        internal static List<string> NormalizeStringList(IEnumerable<string> values, char[] splitDelimiters = null)
+        {
+            if (values == null)
+            {
+                return null;
+            }
+
+            IEnumerable<string> tokens = splitDelimiters is { Length: > 0 }
+                ? values
+                    .Where(v => !string.IsNullOrWhiteSpace(v))
+                    .SelectMany(v => v.Split(splitDelimiters, StringSplitOptions.RemoveEmptyEntries))
+                : values.Where(v => !string.IsNullOrWhiteSpace(v));
+
+            var list = tokens
+                .Select(v => v.Trim())
+                .Where(v => v.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            return list.Count > 0 ? list : null;
+        }
+
     }
 
     /// <summary>
@@ -530,5 +574,32 @@ namespace StrmTool
 
         [JsonPropertyName("totalBitrate")]
         public int TotalBitrate { get; set; }
+
+        [JsonPropertyName("audioTagsProbed")]
+        public bool? AudioTagsProbed { get; set; }
+
+        [JsonPropertyName("title")]
+        public string Title { get; set; }
+
+        [JsonPropertyName("album")]
+        public string Album { get; set; }
+
+        [JsonPropertyName("artists")]
+        public List<string> Artists { get; set; }
+
+        [JsonPropertyName("albumArtists")]
+        public List<string> AlbumArtists { get; set; }
+
+        [JsonPropertyName("trackNumber")]
+        public int? TrackNumber { get; set; }
+
+        [JsonPropertyName("discNumber")]
+        public int? DiscNumber { get; set; }
+
+        [JsonPropertyName("productionYear")]
+        public int? ProductionYear { get; set; }
+
+        [JsonPropertyName("genres")]
+        public List<string> Genres { get; set; }
     }
 }

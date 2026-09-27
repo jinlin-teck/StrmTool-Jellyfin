@@ -64,7 +64,7 @@ namespace StrmTool
 
                 if (hasVideo || hasAudio)
                 {
-                    return StrmMediaInfoService.NeedsRestore(item, cacheData)
+                    return StrmMediaInfoService.NeedsRestore(item, cacheData, LibraryManager)
                         || StrmMediaInfoService.HasMissingLocalLyrics(item, streams);
                 }
 
@@ -115,11 +115,16 @@ namespace StrmTool
             }
 
             // 元数据恢复：逐字段判断仍缺失才写入（与 ItemUpdateListener 共用逻辑，并发执行幂等）
-            if (StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData))
+            if (StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData, LibraryManager))
             {
                 await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
                 changed = true;
                 Logger.LogInformation("{Name}: metadata restored from cache", item.Name);
+            }
+
+            if (await service.SyncAudioRelationshipsAsync(item, cancellationToken).ConfigureAwait(false))
+            {
+                changed = true;
             }
 
             return changed;

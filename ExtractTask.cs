@@ -182,16 +182,26 @@ namespace StrmTool
                 return false;
             }
 
-            if (!_mediaCache.TryGetCachedMediaStreams(item.Path, out var cachedStreams))
+            if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) ||
+                cacheData.MediaStreams == null ||
+                cacheData.MediaStreams.Count == 0)
+            {
+                return false;
+            }
+
+            // 旧版缓存尚未探测音频内嵌标签：若当前音频仍缺少专辑/艺术家信息，走一次探测以补齐标签并升级缓存
+            if (cacheData.AudioTagsProbed != true &&
+                StrmMediaInfoService.HasMissingAudioMetadata(item, _libraryManager))
             {
                 return false;
             }
 
             try
             {
-                await _mediaInfoService.SaveMediaStreamsAsync(item, cachedStreams, cancellationToken).ConfigureAwait(false);
+                StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData, _libraryManager);
+                await _mediaInfoService.SaveMediaStreamsAsync(item, cacheData.MediaStreams, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("{Name}: Used cached media info ({Count} streams)",
-                    item.Name, cachedStreams.Count);
+                    item.Name, cacheData.MediaStreams.Count);
                 return true;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -203,6 +213,27 @@ namespace StrmTool
                 _logger.LogWarning(ex, "{Name}: Failed to save cached media streams", item.Name);
                 return false;
             }
+        }
+
+        private bool NeedsAudioMetadataRefresh(BaseItem item, bool checkParentAlbum = false)
+        {
+            if (!StrmMediaInfoService.HasMissingAudioMetadata(item, _libraryManager, checkParentAlbum))
+            {
+                return false;
+            }
+
+            if (!_config.EnableMediaInfoCache || _config.ForceRefreshIgnoreCache)
+            {
+                return true;
+            }
+
+            if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData))
+            {
+                return true;
+            }
+
+            return cacheData.AudioTagsProbed != true ||
+                   StrmMediaInfoService.NeedsRestore(item, cacheData, checkParentAlbum ? _libraryManager : null);
         }
 
         private bool HasInvalidCache(BaseItem item)
@@ -235,7 +266,16 @@ namespace StrmTool
                     width: probeResult.Width,
                     height: probeResult.Height,
                     totalBitrate: probeResult.TotalBitrate,
-                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                    cancellationToken: cancellationToken,
+                    audioTagsProbed: probeResult.AudioTagsProbed,
+                    title: probeResult.Title,
+                    album: probeResult.Album,
+                    artists: probeResult.Artists,
+                    albumArtists: probeResult.AlbumArtists,
+                    trackNumber: probeResult.TrackNumber,
+                    discNumber: probeResult.DiscNumber,
+                    productionYear: probeResult.ProductionYear,
+                    genres: probeResult.Genres).ConfigureAwait(false);
             }
 
             return probeResult;
@@ -370,7 +410,7 @@ namespace StrmTool
                             bool hasVideo = mediaStreams.Any(s => s.Type == MediaStreamType.Video);
                             bool hasAudio = mediaStreams.Any(s => s.Type == MediaStreamType.Audio);
 
-                            if (_config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio) || HasInvalidCache(item) || StrmMediaInfoService.HasMissingLocalLyrics(item, mediaStreams))
+                            if (_config.ForceRefreshIgnoreExisting || !(hasVideo || hasAudio) || HasInvalidCache(item) || StrmMediaInfoService.HasMissingLocalLyrics(item, mediaStreams) || NeedsAudioMetadataRefresh(item))
                             {
                                 local.Add(item);
                             }
@@ -469,16 +509,18 @@ namespace StrmTool
             }
 
             if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) ||
-                !StrmMediaInfoService.NeedsRestore(item, cacheData))
+                !StrmMediaInfoService.NeedsRestore(item, cacheData, _libraryManager))
             {
                 return;
             }
 
-            if (StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData))
+            if (StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData, _libraryManager))
             {
                 await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("{Prefix} - Restored metadata for {Name} (Size={Size})", logPrefix, item.Name, cacheData.Size);
             }
+
+            await _mediaInfoService.SyncAudioRelationshipsAsync(item, cancellationToken).ConfigureAwait(false);
         }
 
         private async Task<bool> ProcessSingleItemAsync(BaseItem item, CancellationToken cancellationToken)
@@ -533,7 +575,7 @@ namespace StrmTool
                 bool hasVideo = beforeStreams.Any(s => s.Type == MediaStreamType.Video);
                 bool hasAudio = beforeStreams.Any(s => s.Type == MediaStreamType.Audio);
 
-                if (!_config.ForceRefreshIgnoreExisting && (hasVideo || hasAudio) && !HasInvalidCache(item) && !StrmMediaInfoService.HasMissingLocalLyrics(item, beforeStreams))
+                if (!_config.ForceRefreshIgnoreExisting && (hasVideo || hasAudio) && !HasInvalidCache(item) && !StrmMediaInfoService.HasMissingLocalLyrics(item, beforeStreams) && !NeedsAudioMetadataRefresh(item, checkParentAlbum: true))
                 {
                     _logger.LogInformation("{Name} already has media stream info, skipping", fileName);
                     return;
