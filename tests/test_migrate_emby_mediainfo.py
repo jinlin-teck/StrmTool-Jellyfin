@@ -52,6 +52,99 @@ class MigrationTests(unittest.TestCase):
             stream = M["convert_single_stream"]({"Type": "Subtitle", "DeliveryMethod": raw}, True)
             self.assertNotIn("DeliveryMethod", stream)
 
+    def test_emby_numeric_stream_types(self):
+        expected = {1: 0, 2: 1, 3: 2, 4: 3, 6: 4}
+        for emby_type, jellyfin_type in expected.items():
+            with self.subTest(emby_type=emby_type):
+                stream = M["convert_single_stream"]({"Type": emby_type, "Codec": "h264"}, True)
+                self.assertEqual(jellyfin_type, stream["Type"])
+        for raw in (0, 5, 7, True):
+            with self.subTest(raw=raw):
+                self.assertIsNone(M["normalize_stream_type"](raw))
+
+    def test_numeric_types_detected_for_video_and_audio(self):
+        payload, reason = M["build_jellyfin_cache_payload"](
+            [{"MediaSourceInfo": {"MediaStreams": [
+                {"Type": 2, "Codec": "hevc", "Index": 0},
+                {"Type": 1, "Codec": "aac", "Index": 1},
+            ]}}],
+            strm_hash="H",
+        )
+        self.assertIsNone(reason)
+        self.assertEqual([1, 0], [stream["Type"] for stream in payload["mediaStreams"]])
+
+    def test_hdr10plus_and_dovi_profiles(self):
+        # Jellyfin 的 VideoRangeType 是计算属性，真正决定 HDR 范围的是 DvProfile / 兼容位 / 标志位，
+        # 因此这里断言这些输入字段，而不是会被 Jellyfin 忽略的 VideoRangeType 存储值。
+        cases = {
+            "DoviProfile50": (5, 0, 0),
+            "DoviProfile76": (7, 6, 1),
+            "DoviProfile81": (8, 1, 0),
+            "DoviProfile82": (8, 2, 0),
+            "DoviProfile84": (8, 4, 0),
+            "DoviProfile83": (8, 0, 0),
+            "DoviProfile92": (9, 0, 0),
+        }
+        for sub_type, (profile, compat_id, el_flag) in cases.items():
+            with self.subTest(sub_type=sub_type):
+                stream = M["convert_single_stream"]({
+                    "Type": "Video",
+                    "ExtendedVideoType": "DolbyVision",
+                    "ExtendedVideoSubType": sub_type,
+                }, True)
+                self.assertEqual(profile, stream["DvProfile"])
+                self.assertEqual(compat_id, stream["DvBlSignalCompatibilityId"])
+                self.assertEqual(el_flag, stream["ElPresentFlag"])
+                self.assertEqual(1, stream["BlPresentFlag"])
+                self.assertEqual(1, stream["RpuPresentFlag"])
+
+        hdr10plus = M["convert_single_stream"]({
+            "Type": "Video",
+            "ExtendedVideoType": "Hdr10Plus",
+            "ExtendedVideoSubType": "Hdr10Plus0",
+        }, True)
+        self.assertEqual("smpte2084", hdr10plus["ColorTransfer"])
+        self.assertTrue(hdr10plus["Hdr10PlusPresentFlag"])
+
+        unknown = M["convert_single_stream"]({
+            "Type": "Video",
+            "ExtendedVideoType": "DolbyVision",
+            "ExtendedVideoSubType": "DoviProfileXX",
+        }, True)
+        self.assertEqual(2, unknown["VideoRange"])
+        self.assertEqual(4, unknown["VideoRangeType"])
+
+    def test_audio_lyric_streams_collapse_to_single_lyric(self):
+        folder = self.root / "audio"
+        folder.mkdir()
+        (folder / "song.lrc").write_text("[00:00.00]lyrics", encoding="utf-8")
+        payload, reason = M["build_jellyfin_cache_payload"](
+            [{"MediaSourceInfo": {"MediaStreams": [
+                {"Type": "Audio", "Codec": "flac", "Index": 0},
+                {"Type": "Subtitle", "Codec": "text", "Index": 1, "Extradata": "embedded lyrics"},
+                {"Type": "Subtitle", "Codec": "lrc", "Index": 2, "IsExternal": True, "Path": "song.lrc"},
+            ]}}],
+            strm_hash="H",
+            include_audio=True,
+            strm_dir=str(folder),
+            base_name="song",
+        )
+        self.assertIsNone(reason)
+        self.assertEqual([], [stream for stream in payload["mediaStreams"] if stream["Type"] == 2])
+        lyrics = [stream for stream in payload["mediaStreams"] if stream["Type"] == 5]
+        self.assertEqual(1, len(lyrics))
+        self.assertEqual("song.lrc", lyrics[0]["Path"])
+
+    def test_include_audio_prints_warning(self):
+        source = self.source()
+        data = json.loads(source.read_text(encoding="utf-8"))
+        data[0]["MediaSourceInfo"]["MediaStreams"] = [{"Type": "Audio", "Codec": "flac", "Index": 0}]
+        source.write_text(json.dumps(data), encoding="utf-8")
+        result = self.cli(source, "--include-audio", "--dry-run")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("--include-audio", result.stderr)
+        self.assertIn("AudioMetadata", result.stderr)
+
     def test_bom_hashes(self):
         target = "https://example.com/电影"
         expected = hashlib.sha256(target.encode()).hexdigest().upper()

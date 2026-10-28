@@ -6,12 +6,15 @@
 1. 默认在对应 `.strm` 同目录生成 `{basename}.strmtool.json`，不修改、不删除原 `*-mediainfo.json`。
 2. 自动读取同目录 `.strm` 计算 SHA256 内容指纹 (`strmContentHash`)，满足 Jellyfin 版缓存校验。
 3. 自动完成 Emby -> Jellyfin MediaStream 结构映射：
-   - 字符串枚举 `Type` / `DeliveryMethod` 转为 Jellyfin 整数枚举；
-   - 过滤 Emby 专有的 `Attachment` 流及纯音频伪字幕歌词流；
-   - 将 Emby 的杜比视界 (`DoviProfile50` / `DoviProfile76` / `DoviProfile81`) 映射为 Jellyfin `DvProfile` 等字段；
-   - 自动补齐 HDR 的 `ColorTransfer` 与 Dolby Atmos / DTS:X 音轨的 `Profile`；
+   - 字符串/数值枚举 `Type` / `DeliveryMethod` 转为 Jellyfin 整数枚举（两套枚举编号不同）；
+   - 过滤 Emby 专有的 `Attachment` 流，以及纯音频中以字幕形式导出的内嵌/外挂歌词流；
+   - 将 Emby 的杜比视界 `DoviProfileXX` 映射为 Jellyfin `DvProfile` / 兼容位 / 标志位，
+     实际 HDR 范围由 Jellyfin 根据这些字段计算，未识别 profile 不再由脚本直接写成 SDR；
+   - 自动补齐 HDR10 / HLG / HDR10+ 的 `ColorTransfer`（HDR10+ 另写 `Hdr10PlusPresentFlag`）；
+   - 自动补齐 Dolby Atmos / DTS:X 音轨的 `Profile`；
    - 剔除 Emby 专有冗余字段，原子写入目标文件。
 4. 默认跳过纯音频文件（可通过 `--include-audio` 开启）与已存在的 `.strmtool.json`（可通过 `--overwrite` 覆盖）。
+   `--include-audio` 仅迁移技术流与歌词路径，不迁移 `AudioMetadata` 标签。
 5. 支持 `--dry-run` 预览与 `--output-dir` 隔离输出（用于无污染测试）。
 """
 
@@ -43,7 +46,79 @@ STREAM_TYPE_MAP: dict[str, int] = {
     "Lyric": 5,
 }
 
+# Emby 的 MediaStreamType 数值枚举与 Jellyfin 不同：
+# Emby: Audio=1 / Video=2 / Subtitle=3 / EmbeddedImage=4 / Attachment=5 / Data=6
+# Jellyfin: Audio=0 / Video=1 / Subtitle=2 / EmbeddedImage=3 / Data=4 / Lyric=5
+# Attachment 与 Unknown 在 Jellyfin 没有对应类型，返回 None 由调用方过滤。
+EMBY_STREAM_TYPE_MAP: dict[int, int] = {
+    1: 0,
+    2: 1,
+    3: 2,
+    4: 3,
+    6: 4,
+}
+
 DELIVERY_METHOD_MAP = {"Encode": 0, "Embed": 1, "External": 2, "Hls": 3, "Drop": 4}
+
+# Emby 的 ExtendedVideoSubType -> Jellyfin 杜比视界字段。
+# 值：(DvProfile, DvBlSignalCompatibilityId, VideoRangeType, VideoDoViTitle)
+DOVI_PROFILE_TABLE: dict[str, tuple[int, int, int, str]] = {
+    "DoviProfile50": (5, 0, 4, "Dolby Vision Profile 5"),
+    "DoviProfile76": (7, 6, 8, "Dolby Vision Profile 7.6 (HDR10)"),
+    "DoviProfile81": (8, 1, 5, "Dolby Vision Profile 8.1 (HDR10)"),
+    "DoviProfile82": (8, 2, 7, "Dolby Vision Profile 8.2 (SDR)"),
+    "DoviProfile84": (8, 4, 6, "Dolby Vision Profile 8.4 (HLG)"),
+}
+# profile 8 的兼容基础层：1=HDR10, 2=SDR, 4=HLG
+DOVI_COMPAT_RANGE_TYPES = {1: 5, 2: 7, 4: 6}
+
+
+def normalize_stream_type(raw_type: Any) -> int | None:
+    """把 Emby 的字符串或数值枚举统一转换为 Jellyfin 的数值枚举。"""
+    if isinstance(raw_type, bool):
+        return None
+    if isinstance(raw_type, int):
+        return EMBY_STREAM_TYPE_MAP.get(raw_type)
+    if isinstance(raw_type, str):
+        return STREAM_TYPE_MAP.get(raw_type)
+    return None
+
+
+def apply_dovi_mapping(stream: dict[str, Any], ext_sub: Any) -> bool:
+    """
+    把 Emby 的 DoviProfileXX 映射为 Jellyfin 杜比视界字段。
+    Jellyfin 的 VideoRangeType 是计算属性，实际范围由这里写入的 DvProfile / 兼容位 / 标志位决定。
+    未识别的 profile 也会保留这些字段，避免脚本直接把杜比视界流写成 SDR。
+    """
+    if not isinstance(ext_sub, str) or not ext_sub.startswith("DoviProfile"):
+        return False
+
+    suffix = ext_sub[len("DoviProfile"):]
+    if not suffix.isdigit():
+        return False
+    profile, version = divmod(int(suffix), 10)
+    if profile <= 0:
+        return False
+
+    mapped = DOVI_PROFILE_TABLE.get(ext_sub)
+    if mapped:
+        _, compat_id, range_type, title = mapped
+    else:
+        compat_id = 6 if profile == 7 else (version if profile == 8 and version in DOVI_COMPAT_RANGE_TYPES else 0)
+        range_type = 8 if profile == 7 else (DOVI_COMPAT_RANGE_TYPES.get(version, 4) if profile == 8 else 4)
+        title = f"Dolby Vision Profile {profile}.{version}"
+
+    if profile in (5, 7, 8, 9):
+        stream["DvProfile"] = profile
+    stream["DvBlSignalCompatibilityId"] = compat_id
+    stream["BlPresentFlag"] = 1
+    stream["RpuPresentFlag"] = 1
+    stream["ElPresentFlag"] = 1 if profile == 7 else 0
+    stream["VideoRange"] = 2
+    stream["VideoRangeType"] = range_type
+    stream["VideoDoViTitle"] = title
+    return True
+
 
 # Jellyfin MediaStream 允许保留的可写/标准属性顺序（与 System.Text.Json 序列化对齐）
 ALLOWED_STREAM_KEYS: tuple[str, ...] = (
@@ -169,22 +244,18 @@ def is_safe_local_filename(path_val: str) -> bool:
 
 
 def convert_single_stream(raw: dict[str, Any], has_video: bool) -> dict[str, Any] | None:
-    raw_type = raw.get("Type")
-    if isinstance(raw_type, int):
-        stream_type = raw_type
-    elif isinstance(raw_type, str):
-        if raw_type == "Attachment":
-            return None
-        stream_type = STREAM_TYPE_MAP.get(raw_type)
-        if stream_type is None:
-            return None
-    else:
+    stream_type = normalize_stream_type(raw.get("Type"))
+    if stream_type is None:
         return None
 
     codec = raw.get("Codec")
-    # 纯音频中 Emby 会将歌词导出为 Type=Subtitle, Codec=text，在 Jellyfin 中需剔除
-    if not has_video and stream_type == 2 and isinstance(codec, str) and codec.lower() == "text":
-        return None
+    # 纯音频的歌词在 Emby 中以 Subtitle 导出（内嵌 Codec=text、本地 .lrc/.elrc 外挂流），
+    # Jellyfin 只识别 Type=Lyric，统一剔除后由下方按磁盘文件补一条歌词流。
+    if not has_video and stream_type == 2:
+        codec_name = codec.lower() if isinstance(codec, str) else ""
+        path_ext = os.path.splitext(str(raw.get("Path") or ""))[1].lower()
+        if codec_name in {"text", "lrc", "elrc", "txt"} or path_ext in {".lrc", ".elrc", ".txt"}:
+            return None
 
     is_external = bool(raw.get("IsExternal", False))
     if is_external and stream_type == 2:
@@ -211,40 +282,24 @@ def convert_single_stream(raw: dict[str, Any], has_video: bool) -> dict[str, Any
     # 内封流 SupportsExternalStream 在 Jellyfin 缓存中为 false，外挂文本字幕保持 true
     s["SupportsExternalStream"] = bool(s.get("SupportsExternalStream", False)) if is_external else False
 
-    # Video 范围与杜比视界映射
+    # Video 范围与 HDR / 杜比视界映射
     if stream_type == 1:
         ext_type = raw.get("ExtendedVideoType")
         ext_sub = raw.get("ExtendedVideoSubType")
         emby_vr = raw.get("VideoRange")
         color_transfer = raw.get("ColorTransfer")
 
-        if ext_sub == "DoviProfile50":
-            s["DvProfile"] = 5
-            s["DvBlSignalCompatibilityId"] = 0
-            s["BlPresentFlag"] = 1
-            s["RpuPresentFlag"] = 1
-            s["ElPresentFlag"] = 0
+        if apply_dovi_mapping(s, ext_sub):
+            pass
+        elif ext_type == "Hdr10Plus" or ext_sub == "Hdr10Plus0":
+            s["ColorTransfer"] = "smpte2084"
+            s["VideoRange"] = 2
+            s["VideoRangeType"] = 12  # HDR10Plus
+            s["Hdr10PlusPresentFlag"] = True
+        elif ext_type == "DolbyVision" or emby_vr == "DolbyVision":
+            # 未知 / 无法解析的 profile：写入缓存占位（Jellyfin 读取时按 DvProfile/兼容位/色彩字段计算）
             s["VideoRange"] = 2
             s["VideoRangeType"] = 4  # DOVI
-            s["VideoDoViTitle"] = "Dolby Vision Profile 5"
-        elif ext_sub == "DoviProfile81":
-            s["DvProfile"] = 8
-            s["DvBlSignalCompatibilityId"] = 1
-            s["BlPresentFlag"] = 1
-            s["RpuPresentFlag"] = 1
-            s["ElPresentFlag"] = 0
-            s["VideoRange"] = 2
-            s["VideoRangeType"] = 5  # DOVIWithHDR10
-            s["VideoDoViTitle"] = "Dolby Vision Profile 8.1 (HDR10)"
-        elif ext_sub == "DoviProfile76":
-            s["DvProfile"] = 7
-            s["DvBlSignalCompatibilityId"] = 6
-            s["BlPresentFlag"] = 1
-            s["RpuPresentFlag"] = 1
-            s["ElPresentFlag"] = 1
-            s["VideoRange"] = 2
-            s["VideoRangeType"] = 8  # DOVIWithEL
-            s["VideoDoViTitle"] = "Dolby Vision Profile 7.6 (HDR10)"
         elif ext_type == "Hdr10" or emby_vr == "HDR 10" or color_transfer == "smpte2084":
             s["ColorTransfer"] = "smpte2084"
             s["VideoRange"] = 2
@@ -333,14 +388,13 @@ def build_jellyfin_cache_payload(
     if not isinstance(raw_streams, list) or len(raw_streams) == 0:
         return None, "missing or empty MediaStreams"
 
-    has_video = any(
-        isinstance(st, dict) and st.get("Type") in ("Video", 1)
+    normalized_types = [
+        normalize_stream_type(st.get("Type"))
         for st in raw_streams
-    )
-    has_audio = any(
-        isinstance(st, dict) and st.get("Type") in ("Audio", 0)
-        for st in raw_streams
-    )
+        if isinstance(st, dict)
+    ]
+    has_video = 1 in normalized_types
+    has_audio = 0 in normalized_types
 
     if not has_video and not has_audio:
         return None, "no video or audio stream in MediaStreams"
@@ -575,7 +629,7 @@ def main() -> int:
     parser.add_argument(
         "--include-audio",
         action="store_true",
-        help="同时转换纯音频文件（默认跳过纯音频）",
+        help="同时转换纯音频文件（默认跳过；不迁移 AudioMetadata 标签，Jellyfin 侧可能仍需探测）",
     )
     parser.add_argument(
         "--dry-run",
@@ -590,6 +644,12 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+    if args.include_audio:
+        print(
+            "[WARN] --include-audio 只迁移音频的技术流与歌词路径，不会迁移 AudioMetadata 标签；"
+            "Jellyfin 侧可能因缺少专辑/艺术家信息触发一次远程探测。",
+            file=sys.stderr,
+        )
     output_dir = os.path.abspath(args.output_dir) if args.output_dir else None
     try:
         tasks = prepare_tasks(collect_tasks(args.paths), output_dir)
