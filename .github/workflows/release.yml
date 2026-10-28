@@ -42,6 +42,9 @@ jobs:
       - name: Run config page tests
         run: node --test tests/config-page.test.cjs
 
+      - name: Run migration script tests
+        run: python3 -B -m unittest discover -s tests -p 'test_migrate_*.py'
+
       - name: Resolve version metadata
         id: meta
         env:

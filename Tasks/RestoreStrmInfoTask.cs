@@ -23,9 +23,8 @@ namespace StrmTool
             ILibraryManager libraryManager,
             IMediaEncoder mediaEncoder,
             IMediaStreamRepository mediaStreamRepository,
-            IItemRepository itemRepository,
             ILogger<RestoreStrmInfoTask> logger)
-            : base(libraryManager, mediaEncoder, mediaStreamRepository, itemRepository, logger)
+            : base(libraryManager, mediaEncoder, mediaStreamRepository, logger)
         {
         }
 
@@ -94,7 +93,9 @@ namespace StrmTool
             StrmMediaInfoService service, MediaInfoCache cache, BaseItem item, CancellationToken cancellationToken)
         {
             // 处理前重新读取缓存，确保仍有效（指纹校验内建）
-            if (!cache.TryGetFullCache(item.Path, out var cacheData))
+            var cacheData = await cache.GetFullCacheAsync(item.Path, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            if (cacheData == null)
             {
                 return false;
             }
@@ -115,16 +116,11 @@ namespace StrmTool
             }
 
             // 元数据恢复：逐字段判断仍缺失才写入（与 ItemUpdateListener 共用逻辑，并发执行幂等）
-            if (StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData, LibraryManager))
+            if (await StrmMediaInfoService.RestoreMetadataFromCacheAsync(
+                    item, cacheData, LibraryManager, cancellationToken, Logger).ConfigureAwait(false))
             {
-                await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
                 changed = true;
                 Logger.LogInformation("{Name}: metadata restored from cache", item.Name);
-            }
-
-            if (await service.SyncAudioRelationshipsAsync(item, cancellationToken).ConfigureAwait(false))
-            {
-                changed = true;
             }
 
             return changed;

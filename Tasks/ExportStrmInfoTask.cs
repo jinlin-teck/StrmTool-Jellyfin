@@ -22,9 +22,8 @@ namespace StrmTool
             ILibraryManager libraryManager,
             IMediaEncoder mediaEncoder,
             IMediaStreamRepository mediaStreamRepository,
-            IItemRepository itemRepository,
             ILogger<ExportStrmInfoTask> logger)
-            : base(libraryManager, mediaEncoder, mediaStreamRepository, itemRepository, logger)
+            : base(libraryManager, mediaEncoder, mediaStreamRepository, logger)
         {
         }
 

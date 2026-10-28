@@ -62,7 +62,7 @@ namespace StrmTool.Tests
         {
             public ExtractHarness()
                 : base(DispatchProxy.Create<ILibraryManager, TaskRegressionTests.NoOpLibraryProxy>(),
-                    null, null, null, NullLogger<ExtractTask>.Instance)
+                    null, null, NullLogger<ExtractTask>.Instance)
             {
                 _config = new PluginConfiguration { MaxConcurrentExtract = 2 };
             }

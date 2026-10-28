@@ -42,19 +42,19 @@ namespace StrmTool
         private readonly ILibraryManager _libraryManager;
         private readonly IMediaEncoder _mediaEncoder;
         private readonly IMediaStreamRepository _mediaStreamRepository;
+        private readonly StrmLibraryQueryService _libraryQuery;
 
         public StrmMediaInfoService(
             ILibraryManager libraryManager,
             IMediaEncoder mediaEncoder,
             IMediaStreamRepository mediaStreamRepository,
-            // 保留该形参以兼容现有调用方与测试签名；当前实现不再使用
-            IItemRepository itemRepository,
             ILogger logger)
         {
             _libraryManager = libraryManager;
             _mediaEncoder = mediaEncoder;
             _mediaStreamRepository = mediaStreamRepository;
             _logger = logger;
+            _libraryQuery = new StrmLibraryQueryService(libraryManager, logger);
         }
 
         /// <summary>
@@ -64,42 +64,7 @@ namespace StrmTool
         /// <returns>所有 strm 文件对应的库条目列表，永不为 null</returns>
         public List<BaseItem> GetAllStrmItems(CancellationToken cancellationToken)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            // 通过库查询直接取候选条目（strm 入库后即 Movie/Episode/Video/Audio），再按扩展名内存过滤；
-            // 相比递归磁盘枚举，避免了全目录遍历、权限目录处理以及逐文件 FindByPath 的数据库往返
-            var query = new InternalItemsQuery
-            {
-                Recursive = true,
-                IsVirtualItem = false,
-                IncludeItemTypes = new[]
-                {
-                    BaseItemKind.Movie,
-                    BaseItemKind.Episode,
-                    BaseItemKind.Video,
-                    BaseItemKind.MusicVideo,
-                    BaseItemKind.Audio
-                }
-            };
-
-            try
-            {
-                var items = _libraryManager.GetItemList(query);
-                cancellationToken.ThrowIfCancellationRequested();
-                return items
-                    .Where(i => i != null && !string.IsNullOrWhiteSpace(i.Path) && IsStrmFile(i.Path))
-                    .GroupBy(i => i.Path, StrmPathHelper.PathComparer)
-                    .Select(g => g.First())
-                    .ToList();
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error querying library for strm items");
-                return new List<BaseItem>();
-            }
+            return _libraryQuery.GetAllStrmItems(cancellationToken);
         }
 
         /// <summary>
@@ -109,25 +74,7 @@ namespace StrmTool
         /// <returns>媒体流列表，若无法获取则返回空列表</returns>
         public List<MediaStream> GetItemMediaStreams(BaseItem item)
         {
-            try
-            {
-                // 使用 IHasMediaSources 接口获取媒体流，避免反射
-                if (item is IHasMediaSources hasMediaSources)
-                {
-                    var streams = hasMediaSources.GetMediaStreams();
-                    if (streams != null)
-                    {
-                        return streams.ToList();
-                    }
-                }
-
-                return new List<MediaStream>();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error getting media streams for {ItemType}", item.GetType().Name);
-                return new List<MediaStream>();
-            }
+            return _libraryQuery.GetItemMediaStreams(item);
         }
 
         /// <summary>
@@ -182,10 +129,8 @@ namespace StrmTool
             foreach (var stream in external)
             {
                 // Pathless streams cannot be safely deduplicated by filename.
-                var path = stream.Path;
-                if (path != null && OperatingSystem.IsWindows() && !path.Contains("://"))
-                    path = path.ToUpperInvariant();
-                if (path == null || seenPaths.Add((stream.Type, path)))
+                var pathKey = NormalizeStreamPathKey(stream.Path);
+                if (pathKey == null || seenPaths.Add((stream.Type, pathKey)))
                     selected.Add(stream);
             }
 
@@ -196,6 +141,24 @@ namespace StrmTool
             return result;
         }
 
+        private static string NormalizeStreamPathKey(string path)
+        {
+            if (path == null)
+            {
+                return null;
+            }
+
+            if (path.Contains("://", StringComparison.Ordinal) &&
+                Uri.TryCreate(path, UriKind.Absolute, out var uri))
+            {
+                // URL 的 scheme/host 不区分大小写，路径与查询串保持原样
+                return uri.Scheme.ToLowerInvariant() + "://" + uri.Authority.ToLowerInvariant() +
+                       uri.PathAndQuery + uri.Fragment;
+            }
+
+            return OperatingSystem.IsWindows() ? path.ToUpperInvariant() : path;
+        }
+
         private static void ApplyProbeMetadata(BaseItem item, MediaProbeResult result)
         {
             item.Size = result.Size > 0 ? result.Size : null;
@@ -204,11 +167,7 @@ namespace StrmTool
             item.Width = result.Width;
             item.Height = result.Height;
             item.TotalBitrate = result.TotalBitrate > 0 ? result.TotalBitrate : null;
-            if (!string.IsNullOrWhiteSpace(result.TargetPath) && StrmPathHelper.GetProtocolFromPath(result.TargetPath) != MediaProtocol.File)
-            {
-                item.IsShortcut = true;
-                item.ShortcutPath = result.TargetPath;
-            }
+            StrmRestorePolicy.TryApplyTargetShortcut(item, result.TargetPath);
 
             if (item is Audio audio)
             {
@@ -330,19 +289,11 @@ namespace StrmTool
         }
 
         /// <summary>
-        /// 判断缓存元数据是否需要恢复（尺寸被重置，或时长/容器/分辨率/码率/歌词标志/Shortcut/音频标签缺失）
+        /// 判断缓存元数据是否需要恢复（具体规则见 <see cref="StrmRestorePolicy"/>）。
         /// </summary>
         public static bool NeedsRestore(BaseItem item, MediaInfoCacheData cacheData, ILibraryManager libraryManager = null)
         {
-            return IsSizeReset(item, cacheData)
-                || (cacheData.RunTimeTicks.HasValue && !item.RunTimeTicks.HasValue)
-                || (!string.IsNullOrEmpty(cacheData.Container) && string.IsNullOrEmpty(item.Container))
-                || (cacheData.Width > 0 && item.Width <= 0)
-                || (cacheData.Height > 0 && item.Height <= 0)
-                || (cacheData.TotalBitrate > 0 && item.TotalBitrate.GetValueOrDefault() <= 0)
-                || LocalLyricLocator.NeedsLyricMetadataRestore(item, cacheData)
-                || AudioMetadataHelper.NeedsAudioMetadataRestore(item, cacheData, libraryManager)
-                || NeedsShortcutRestore(item);
+            return StrmRestorePolicy.NeedsRestore(item, cacheData, libraryManager);
         }
 
         /// <summary>
@@ -350,24 +301,7 @@ namespace StrmTool
         /// </summary>
         public static bool IsSizeReset(BaseItem item, MediaInfoCacheData cacheData)
         {
-            return cacheData.Size > 0 && item.Size.GetValueOrDefault() < cacheData.Size / 10;
-        }
-
-        private static bool NeedsShortcutRestore(BaseItem item)
-        {
-            if (item == null || !IsStrmFile(item.Path))
-            {
-                return false;
-            }
-
-            if (item.IsShortcut && !string.IsNullOrWhiteSpace(item.ShortcutPath))
-            {
-                return false;
-            }
-
-            var targetPath = ReadStrmTargetPath(item.Path);
-            return !string.IsNullOrWhiteSpace(targetPath) &&
-                   StrmPathHelper.GetProtocolFromPath(targetPath) != MediaProtocol.File;
+            return StrmRestorePolicy.IsSizeReset(item, cacheData);
         }
 
         /// <summary>
@@ -376,66 +310,7 @@ namespace StrmTool
         /// </summary>
         public static bool TryRestoreMetadataFromCache(BaseItem item, MediaInfoCacheData cacheData, ILibraryManager libraryManager = null)
         {
-            bool changed = false;
-
-            if (IsSizeReset(item, cacheData))
-            {
-                item.Size = cacheData.Size;
-                changed = true;
-            }
-
-            if (cacheData.RunTimeTicks.HasValue && !item.RunTimeTicks.HasValue)
-            {
-                item.RunTimeTicks = cacheData.RunTimeTicks;
-                changed = true;
-            }
-
-            if (!string.IsNullOrEmpty(cacheData.Container) && string.IsNullOrEmpty(item.Container))
-            {
-                item.Container = cacheData.Container;
-                changed = true;
-            }
-
-            if (cacheData.Width > 0 && item.Width <= 0)
-            {
-                item.Width = cacheData.Width;
-                changed = true;
-            }
-
-            if (cacheData.Height > 0 && item.Height <= 0)
-            {
-                item.Height = cacheData.Height;
-                changed = true;
-            }
-
-            if (cacheData.TotalBitrate > 0 && item.TotalBitrate.GetValueOrDefault() <= 0)
-            {
-                item.TotalBitrate = cacheData.TotalBitrate;
-                changed = true;
-            }
-
-            if (LocalLyricLocator.TryRestoreLyricMetadataFromCache(item, cacheData))
-            {
-                changed = true;
-            }
-
-            if (AudioMetadataHelper.TryRestoreAudioMetadataFromCache(item, cacheData, libraryManager))
-            {
-                changed = true;
-            }
-
-            if (item != null && IsStrmFile(item.Path) && (!item.IsShortcut || string.IsNullOrWhiteSpace(item.ShortcutPath)))
-            {
-                var targetPath = ReadStrmTargetPath(item.Path);
-                if (!string.IsNullOrWhiteSpace(targetPath) && StrmPathHelper.GetProtocolFromPath(targetPath) != MediaProtocol.File)
-                {
-                    item.IsShortcut = true;
-                    item.ShortcutPath = targetPath;
-                    changed = true;
-                }
-            }
-
-            return changed;
+            return StrmRestorePolicy.TryRestoreMetadataFromCache(item, cacheData, libraryManager);
         }
 
         public static bool HasMissingAudioMetadata(
@@ -458,6 +333,31 @@ namespace StrmTool
             }
 
             return Task.FromResult(false);
+        }
+
+        /// <summary>
+        /// 从缓存恢复仍缺失的元数据并持久化，随后同步音频关联；返回是否有修改。
+        /// ExtractTask、ItemUpdateListener 与 RestoreStrmInfoTask 统一走此入口。
+        /// </summary>
+        public static async Task<bool> RestoreMetadataFromCacheAsync(
+            BaseItem item,
+            MediaInfoCacheData cacheData,
+            ILibraryManager libraryManager,
+            CancellationToken cancellationToken,
+            ILogger logger = null)
+        {
+            bool changed = TryRestoreMetadataFromCache(item, cacheData, libraryManager);
+            if (changed)
+            {
+                await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (await SyncAudioRelationshipsStaticAsync(item, libraryManager, cancellationToken, logger).ConfigureAwait(false))
+            {
+                changed = true;
+            }
+
+            return changed;
         }
 
         /// <summary>

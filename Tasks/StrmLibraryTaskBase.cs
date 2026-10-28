@@ -22,19 +22,16 @@ namespace StrmTool
         protected readonly ILibraryManager LibraryManager;
         protected readonly IMediaEncoder MediaEncoder;
         protected readonly IMediaStreamRepository MediaStreamRepository;
-        protected readonly IItemRepository ItemRepository;
 
         protected StrmLibraryTaskBase(
             ILibraryManager libraryManager,
             IMediaEncoder mediaEncoder,
             IMediaStreamRepository mediaStreamRepository,
-            IItemRepository itemRepository,
             ILogger logger)
         {
             LibraryManager = libraryManager ?? throw new ArgumentNullException(nameof(libraryManager));
             MediaEncoder = mediaEncoder ?? throw new ArgumentNullException(nameof(mediaEncoder));
             MediaStreamRepository = mediaStreamRepository ?? throw new ArgumentNullException(nameof(mediaStreamRepository));
-            ItemRepository = itemRepository ?? throw new ArgumentNullException(nameof(itemRepository));
             Logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
@@ -61,7 +58,7 @@ namespace StrmTool
         /// </summary>
         protected StrmMediaInfoService CreateMediaInfoService()
         {
-            return new StrmMediaInfoService(LibraryManager, MediaEncoder, MediaStreamRepository, ItemRepository, Logger);
+            return new StrmMediaInfoService(LibraryManager, MediaEncoder, MediaStreamRepository, Logger);
         }
 
         /// <summary>

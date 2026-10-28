@@ -37,7 +37,7 @@ public sealed class MediaInfoServiceTests
         };
         List<MediaStream> saved = null;
         var repository = Proxy<IMediaStreamRepository>((method, args) => { saved = ((IReadOnlyList<MediaStream>)args[1]).ToList(); return null; });
-        var service = new StrmMediaInfoService(null, null, repository, null, NullLogger.Instance);
+        var service = new StrmMediaInfoService(null, null, repository, NullLogger.Instance);
         await service.SaveMediaStreamsAsync(item, incoming, CancellationToken.None);
         Assert.Equal(4, saved.Count);
         Assert.Equal(4, saved.Select(s => s.Index).Distinct().Count());
@@ -121,7 +121,7 @@ public sealed class MediaInfoServiceTests
                 saved = ((IReadOnlyList<MediaStream>)args[1]).ToList();
                 return null;
             });
-            var service = new StrmMediaInfoService(null, null, repository, null, NullLogger.Instance);
+            var service = new StrmMediaInfoService(null, null, repository, NullLogger.Instance);
 
             await service.SaveMediaStreamsAsync(audio, incoming, CancellationToken.None);
 
@@ -139,6 +139,11 @@ public sealed class MediaInfoServiceTests
             Assert.DoesNotContain(saved, s => s.Type == MediaStreamType.Lyric);
             Assert.False(audio.HasLyrics);
             Assert.Empty(audio.LyricFiles);
+
+            // 残留的 HasLyrics 在无任何歌词证据时应复位
+            audio.HasLyrics = true;
+            await service.SaveMediaStreamsAsync(audio, incoming, CancellationToken.None);
+            Assert.False(audio.HasLyrics);
         }
         finally
         {
@@ -200,6 +205,116 @@ public sealed class MediaInfoServiceTests
         {
             Directory.Delete(directory, true);
         }
+    }
+
+    [Fact]
+    public void CacheRestoreClearsStaleShortcutWhenTargetBecomesLocal()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "strmtool-local-shortcut-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string strmPath = Path.Combine(directory, "movie.strm");
+            string localPath = Path.Combine(directory, "movie.mkv");
+            File.WriteAllText(localPath, "local media");
+            File.WriteAllText(strmPath, localPath);
+
+            var audio = new TestAudio
+            {
+                Id = Guid.NewGuid(),
+                Path = strmPath,
+                IsShortcut = true,
+                ShortcutPath = "https://example.invalid/old.mkv"
+            };
+            var cacheData = new MediaInfoCacheData
+            {
+                IsValid = true,
+                MediaStreams = new List<MediaStream> { new() { Index = 0, Type = MediaStreamType.Audio, Codec = "aac" } }
+            };
+
+            Assert.True(StrmMediaInfoService.NeedsRestore(audio, cacheData));
+            Assert.True(StrmMediaInfoService.TryRestoreMetadataFromCache(audio, cacheData));
+            Assert.False(audio.IsShortcut);
+            Assert.Null(audio.ShortcutPath);
+            Assert.False(StrmMediaInfoService.NeedsRestore(audio, cacheData));
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task ProbeClearsShortcutWhenTargetChangedToLocalFile()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "strmtool-local-probe-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string strmPath = Path.Combine(directory, "movie.strm");
+            string localPath = Path.Combine(directory, "movie.mkv");
+            File.WriteAllText(localPath, "local media");
+            File.WriteAllText(strmPath, localPath);
+
+            var item = new TestVideo
+            {
+                Id = Guid.NewGuid(),
+                Path = strmPath,
+                IsShortcut = true,
+                ShortcutPath = "https://example.invalid/old.mkv"
+            };
+            var mediaInfo = new MediaInfo
+            {
+                Size = 1024,
+                Container = "mkv",
+                MediaStreams = new List<MediaStream> { new() { Index = 0, Type = MediaStreamType.Video, Width = 1920, Height = 1080 } }
+            };
+            var encoder = Proxy<IMediaEncoder>((method, args) => Task.FromResult(mediaInfo));
+            var repository = Proxy<IMediaStreamRepository>((method, args) => null);
+            var library = Proxy<ILibraryManager>((method, args) => null);
+            using var task = new ExtractHarness(library, encoder, repository, cacheEnabled: false, ignoreCache: false);
+
+            await task.ExtractSingleItemAsync(item, CancellationToken.None);
+
+            Assert.False(item.IsShortcut);
+            Assert.Null(item.ShortcutPath);
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public async Task PeopleReadFailureDoesNotReplaceExistingPeople()
+    {
+        var audio = new TestAudio
+        {
+            Id = Guid.NewGuid(),
+            ParentId = Guid.NewGuid(),
+            Name = "婉君",
+            Album = "皇牌影视金曲1",
+            Artists = new[] { "卓依婷" },
+            AlbumArtists = new[] { "卓依婷" }
+        };
+
+        int updatePeopleCalls = 0;
+        var library = Proxy<ILibraryManager>((method, args) =>
+        {
+            switch (method.Name)
+            {
+                case nameof(ILibraryManager.GetPeople):
+                    throw new InvalidOperationException("database unavailable");
+                case nameof(ILibraryManager.UpdatePeople):
+                    updatePeopleCalls++;
+                    return null;
+                default:
+                    return null;
+            }
+        });
+
+        Assert.False(await StrmMediaInfoService.SyncAudioRelationshipsStaticAsync(audio, library, CancellationToken.None));
+        Assert.Equal(0, updatePeopleCalls);
     }
 
     [Fact]
@@ -329,6 +444,103 @@ public sealed class MediaInfoServiceTests
     }
 
     [Fact]
+    public void DecoratorRefreshesLocalTargetAfterStrmChange()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "strmtool-local-target-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string strmPath = Path.Combine(directory, "movie.strm");
+            string first = Path.Combine(directory, "first.mkv");
+            string second = Path.Combine(directory, "second-longer.mkv");
+            File.WriteAllText(first, "first");
+            File.WriteAllText(second, "second");
+            File.WriteAllText(strmPath, first);
+
+            var audio = new TestAudio { Id = Guid.NewGuid(), Path = strmPath };
+            var inner = Proxy<IMediaSourceManager>((method, args) =>
+            {
+                switch (method.Name)
+                {
+                    case nameof(IMediaSourceManager.GetPathProtocol):
+                        return MediaProtocol.File;
+                    case nameof(IMediaSourceManager.SupportsDirectStream):
+                        return false;
+                    case nameof(IMediaSourceManager.GetStaticMediaSources):
+                        return (IReadOnlyList<MediaSourceInfo>)new List<MediaSourceInfo>
+                        {
+                            new() { Path = strmPath, Protocol = MediaProtocol.File }
+                        };
+                    default:
+                        return null;
+                }
+            });
+            using var manager = new StrmMediaSourceManagerDecorator(inner, NullLogger.Instance);
+
+            Assert.Equal(first, Assert.Single(manager.GetStaticMediaSources(audio, enablePathSubstitution: true)).Path);
+
+            File.WriteAllText(strmPath, second);
+            Assert.Equal(second, Assert.Single(manager.GetStaticMediaSources(audio, enablePathSubstitution: true)).Path);
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
+    public void DecoratorRetriesStrmReadAfterTransientFailure()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "strmtool-transient-read-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string strmPath = Path.Combine(directory, "movie.strm");
+            string target = Path.Combine(directory, "movie.mkv");
+            File.WriteAllText(target, "target");
+            File.WriteAllText(strmPath, target);
+
+            var audio = new TestAudio { Id = Guid.NewGuid(), Path = strmPath };
+            var inner = Proxy<IMediaSourceManager>((method, args) =>
+            {
+                switch (method.Name)
+                {
+                    case nameof(IMediaSourceManager.GetPathProtocol):
+                        return MediaProtocol.File;
+                    case nameof(IMediaSourceManager.SupportsDirectStream):
+                        return false;
+                    case nameof(IMediaSourceManager.GetStaticMediaSources):
+                        return (IReadOnlyList<MediaSourceInfo>)new List<MediaSourceInfo>
+                        {
+                            new() { Path = strmPath, Protocol = MediaProtocol.File }
+                        };
+                    default:
+                        return null;
+                }
+            });
+            using var manager = new StrmMediaSourceManagerDecorator(inner, NullLogger.Instance);
+
+            var lastWriteTimeUtc = File.GetLastWriteTimeUtc(strmPath);
+            long length = new FileInfo(strmPath).Length;
+
+            // 元数据可读、内容读失败（共享冲突等瞬态错误）时解析为空，该空结果不得按 mtime+length 缓存
+            using (new FileStream(strmPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                Assert.Equal(strmPath, Assert.Single(manager.GetStaticMediaSources(audio, enablePathSubstitution: true)).Path);
+            }
+
+            // 文件恢复可读且 mtime/length 未变，仍应重新读盘得到真实目标
+            Assert.Equal(lastWriteTimeUtc, File.GetLastWriteTimeUtc(strmPath));
+            Assert.Equal(length, new FileInfo(strmPath).Length);
+            Assert.Equal(target, Assert.Single(manager.GetStaticMediaSources(audio, enablePathSubstitution: true)).Path);
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+    [Fact]
     public void LibraryQueryIncludesMusicVideos()
     {
         var video = new TestVideo { Path = "/music/clip.strm" };
@@ -337,7 +549,7 @@ public sealed class MediaInfoServiceTests
             var query = (InternalItemsQuery)args[0];
             return query.IncludeItemTypes.Contains(BaseItemKind.MusicVideo) ? new List<BaseItem> { video } : new List<BaseItem>();
         });
-        var service = new StrmMediaInfoService(library, null, null, null, NullLogger.Instance);
+        var service = new StrmMediaInfoService(library, null, null, NullLogger.Instance);
         Assert.Same(video, Assert.Single(service.GetAllStrmItems(CancellationToken.None)));
     }
 
@@ -415,6 +627,8 @@ public sealed class MediaInfoServiceTests
                 {
                     case nameof(ILibraryManager.GetItemById):
                         return itemsById.TryGetValue((Guid)args[0], out var found) ? found : null;
+                    case nameof(ILibraryManager.GetPeople):
+                        return (IReadOnlyList<PersonInfo>)new List<PersonInfo>();
                     case nameof(ILibraryManager.UpdatePeople):
                         peopleByItem[((BaseItem)args[0]).Id] = ((List<PersonInfo>)args[1]).ToList();
                         return null;
@@ -519,7 +733,7 @@ public sealed class MediaInfoServiceTests
                 audio.Streams = ((IReadOnlyList<MediaStream>)args[1]).ToList();
                 return null;
             });
-            var service = new StrmMediaInfoService(null, encoder, repository, null, NullLogger.Instance);
+            var service = new StrmMediaInfoService(null, encoder, repository, NullLogger.Instance);
 
             var result = await service.ProbeMediaStreamsAsync(audio, CancellationToken.None);
 
@@ -658,7 +872,7 @@ public sealed class MediaInfoServiceTests
             bool cacheEnabled,
             bool ignoreCache,
             bool ignoreExisting = true)
-            : base(library, encoder, repository, null, NullLogger<ExtractTask>.Instance)
+            : base(library, encoder, repository, NullLogger<ExtractTask>.Instance)
         {
             _config = new PluginConfiguration
             {

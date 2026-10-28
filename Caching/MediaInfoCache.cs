@@ -17,6 +17,7 @@ namespace StrmTool
     {
         private readonly ILogger _logger;
         private const string CacheFileSuffix = ".strmtool.json";
+        private const int MaxQuarantineBackups = 5;
 
         // 有界分片锁：所有实例共用，覆盖读取、隔离和写入的整个事务。
         private static readonly SemaphoreSlim[] CacheLocks = Enumerable.Range(0, 64)
@@ -36,9 +37,17 @@ namespace StrmTool
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         };
 
-        public MediaInfoCache(ILogger logger)
+        private readonly Func<bool> _verifyContentHashDefault;
+
+        public MediaInfoCache(ILogger logger, Func<bool> verifyContentHashDefault = null)
         {
             _logger = logger;
+            _verifyContentHashDefault = verifyContentHashDefault ?? GetConfiguredVerifyContentHash;
+        }
+
+        private static bool GetConfiguredVerifyContentHash()
+        {
+            return Plugin.Instance?.Configuration?.VerifyStrmContentHash ?? true;
         }
 
         /// <summary>
@@ -163,7 +172,7 @@ namespace StrmTool
             if (!ValidateCacheStructure(cache, GetCachePath(strmPath), requireMediaStreams))
                 return false;
 
-            bool shouldVerify = verifyContentHash ?? (Plugin.Instance?.Configuration?.VerifyStrmContentHash ?? true);
+            bool shouldVerify = verifyContentHash ?? _verifyContentHashDefault();
             if (!shouldVerify)
             {
                 // 仅跳过读取时的校验，不迁移或回写指纹；重新启用后仍使用原指纹判断有效性。
@@ -196,11 +205,41 @@ namespace StrmTool
                 }
 
                 File.Move(cachePath, backupPath);
+                PruneQuarantineBackups(cachePath);
                 _logger.LogWarning("Invalid media info cache ({Reason}): {Path} moved to {Backup}", reason, cachePath, backupPath);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Could not move invalid cache file {Path} to .bak", cachePath);
+            }
+        }
+
+        /// <summary>
+        /// 只保留最近若干份隔离备份，避免坏缓存反复生成导致 .bak 无限堆积。
+        /// </summary>
+        private void PruneQuarantineBackups(string cachePath)
+        {
+            try
+            {
+                var directory = Path.GetDirectoryName(cachePath);
+                if (string.IsNullOrWhiteSpace(directory))
+                {
+                    return;
+                }
+
+                var backups = Directory.GetFiles(directory, Path.GetFileName(cachePath) + "*.bak")
+                    .OrderByDescending(File.GetLastWriteTimeUtc)
+                    .Skip(MaxQuarantineBackups)
+                    .ToArray();
+
+                foreach (var backup in backups)
+                {
+                    File.Delete(backup);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to prune quarantine backups for {Path}", cachePath);
             }
         }
 
@@ -236,13 +275,15 @@ namespace StrmTool
         /// </summary>
         public bool TryGetCachedMediaStreams(string strmPath, out List<MediaStream> mediaStreams, bool? verifyContentHash = null)
         {
-            bool found = TryReadCache(strmPath, out var cache, requireMediaStreams: true, verifyContentHash);
-            mediaStreams = found ? cache.MediaStreams : null;
-            return found;
+            var result = TryReadCacheAsync(strmPath, requireMediaStreams: true, verifyContentHash, CancellationToken.None)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+            mediaStreams = result.found ? result.cache.MediaStreams : null;
+            return result.found;
         }
 
         /// <summary>
-        /// 保存完整媒体信息缓存（包含Size等元数据）
+        /// 先写入同目录临时文件，再原子替换目标文件；失败时清理临时文件。
+        /// 调用方需持有该缓存路径的分片锁。
         /// </summary>
         private async Task WriteFileAtomicallyAsync(string filePath, string content, CancellationToken cancellationToken)
         {
@@ -333,7 +374,25 @@ namespace StrmTool
                     if (stream.Path.IndexOfAny(new[] { '/', '\\' }) >= 0 || stream.Path == "." || stream.Path == "..")
                         return true;
                     stream.Path = Path.Combine(directory, stream.Path);
+                    return false;
                 }
+
+                try
+                {
+                    var fullPath = Path.GetFullPath(stream.Path);
+                    if (!string.Equals(Path.GetDirectoryName(fullPath), directory, StrmPathHelper.PathComparison))
+                    {
+                        // 旧缓存中的目录外绝对路径不可信：丢弃，交由 Jellyfin 重新发现
+                        return true;
+                    }
+
+                    stream.Path = fullPath;
+                }
+                catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)
+                {
+                    return true;
+                }
+
                 return false;
             });
         }
@@ -452,44 +511,62 @@ namespace StrmTool
         /// </summary>
         public bool TryGetFullCache(string strmPath, out MediaInfoCacheData cacheData, bool? verifyContentHash = null)
         {
-            return TryReadCache(strmPath, out cacheData, requireMediaStreams: false, verifyContentHash);
+            var result = TryReadCacheAsync(strmPath, requireMediaStreams: false, verifyContentHash, CancellationToken.None)
+                .ConfigureAwait(false).GetAwaiter().GetResult();
+            cacheData = result.cache;
+            return result.found;
         }
 
-        private bool TryReadCache(string strmPath, out MediaInfoCacheData cacheData, bool requireMediaStreams, bool? verifyContentHash)
+        /// <summary>
+        /// 异步读取完整缓存；缓存无效时返回 null。
+        /// 供异步链路使用，避免在 async 方法中同步阻塞线程池线程。
+        /// </summary>
+        public async Task<MediaInfoCacheData> GetFullCacheAsync(
+            string strmPath, bool? verifyContentHash = null, CancellationToken cancellationToken = default)
         {
-            cacheData = null;
+            var result = await TryReadCacheAsync(strmPath, requireMediaStreams: false, verifyContentHash, cancellationToken)
+                .ConfigureAwait(false);
+            return result.found ? result.cache : null;
+        }
+
+        private async Task<(bool found, MediaInfoCacheData cache)> TryReadCacheAsync(
+            string strmPath, bool requireMediaStreams, bool? verifyContentHash, CancellationToken cancellationToken)
+        {
             var gate = GetCacheLock(strmPath);
-            gate.Wait();
+            await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             string cachePath = null;
             try
             {
                 var validated = ValidateCachePath(strmPath);
                 cachePath = validated.cachePath;
                 if (!validated.valid)
-                    return false;
+                    return (false, null);
 
-                var json = File.ReadAllText(cachePath);
+                var json = await File.ReadAllTextAsync(cachePath, cancellationToken).ConfigureAwait(false);
                 var cache = JsonSerializer.Deserialize<MediaInfoCacheData>(json, JsonOptions);
 
                 if (!ValidateCacheData(cache, strmPath, requireMediaStreams, verifyContentHash))
-                    return false;
+                    return (false, null);
 
                 RestoreSubtitlePaths(cache.MediaStreams, strmPath);
-                cacheData = cache;
                 _logger.LogDebug("Loaded full cache (Size={Size}) from {Path}", cache.Size, cachePath);
-                return true;
+                return (true, cache);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (JsonException ex)
             {
                 QuarantineInvalidCacheFile(cachePath, "JSON cannot be deserialized");
                 _logger.LogWarning(ex, "Invalid JSON cache for {Path}", strmPath);
-                return false;
+                return (false, null);
             }
             catch (Exception ex)
             {
                 // 读取失败不等于格式损坏；权限/共享冲突等暂态错误不能触发隔离。
                 _logger.LogWarning(ex, "Error reading full cache from {Path}", strmPath);
-                return false;
+                return (false, null);
             }
             finally
             {

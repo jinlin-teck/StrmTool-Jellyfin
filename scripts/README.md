@@ -28,6 +28,7 @@
      - 自动检测音轨 `Profile` / `Title` / `DisplayTitle` 中的 `Atmos` 或 `DTS:X` 标识并补齐 `Profile`（如 `Dolby Digital Plus + Dolby Atmos`、`Dolby TrueHD + Dolby Atmos`），让 Jellyfin 正确计算只读属性 `AudioSpatialFormat`。已有普通音轨 Profile 时也会补齐空间音频信息。
    - **外挂字幕与歌词索引重排**：
      - 保留同目录外挂字幕文件名，并按 Jellyfin `MergeExternalStreams` 规则将外挂流 `Index` 排在内封流之后。
+     - 远程 URL 外挂字幕保留完整地址并标记 `IsExternalUrl`；指向绝对路径但不在同目录的外挂字幕会被丢弃。
 
 4. **默认跳过纯音频与已有缓存**
    - 默认仅转换包含视频流的条目（电影、剧集、动画、MV 等），跳过纯音频文件（可通过 `--include-audio` 开启）。
@@ -51,7 +52,7 @@ usage: migrate_emby_mediainfo.py [-h] [--output-dir OUTPUT_DIR] [--overwrite]
 | `--output-dir DIR` | 将生成的 `*.strmtool.json` 按相对目录结构输出到指定目录，不写入源目录（用于隔离测试） |
 | `--overwrite` | 覆盖已存在的 `*.strmtool.json`（默认跳过已存在文件） |
 | `--include-audio` | 同时转换纯音频文件（默认跳过纯音频；若同目录存在 `.lrc/.elrc/.txt` 会自动附加 `Type=5` 歌词流）。**注意：不会迁移 Emby 的 `AudioMetadata` 标签，运行时会打印警告** |
-| `--workers N` | 并发工作线程数（默认 `8`） |
+| `--workers N` | 并发工作线程数（默认 `8`，上限 `64`） |
 
 ---
 

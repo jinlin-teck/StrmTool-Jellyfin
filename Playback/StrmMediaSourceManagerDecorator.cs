@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -24,14 +25,22 @@ namespace StrmTool
     /// </summary>
     public class StrmMediaSourceManagerDecorator : IMediaSourceManager, IDisposable
     {
+        private const int MaxCachedTargets = 4096;
+
         private readonly IMediaSourceManager _inner;
         private readonly ILogger _logger;
+        private readonly bool _ownsInner;
+        private readonly ConcurrentDictionary<string, TargetEntry> _resolvedTargets;
 
-        public StrmMediaSourceManagerDecorator(IMediaSourceManager inner, ILogger logger)
+        public StrmMediaSourceManagerDecorator(IMediaSourceManager inner, ILogger logger, bool ownsInner = true)
         {
             _inner = inner ?? throw new ArgumentNullException(nameof(inner));
             _logger = logger;
+            _ownsInner = ownsInner;
+            _resolvedTargets = new ConcurrentDictionary<string, TargetEntry>(StrmPathHelper.PathComparer);
         }
+
+        private readonly record struct TargetEntry(DateTime LastWriteTimeUtc, long Length, string Target);
 
         public void AddParts(IEnumerable<IMediaSourceProvider> providers)
         {
@@ -302,7 +311,7 @@ namespace StrmTool
                 return string.Empty;
             }
 
-            var fromFile = StrmMediaInfoService.ReadStrmTargetPath(item.Path, _logger);
+            var fromFile = ReadStrmTargetWithCache(item.Path);
             if (!string.IsNullOrWhiteSpace(fromFile))
             {
                 if (_inner.GetPathProtocol(fromFile) != MediaProtocol.File)
@@ -315,6 +324,54 @@ namespace StrmTool
             }
 
             return string.Empty;
+        }
+
+        /// <summary>
+        /// 读取 STRM 目标并按文件最后写入时间/长度缓存，避免本地目标在每次取媒体源时重复读盘。
+        /// </summary>
+        private string ReadStrmTargetWithCache(string strmPath)
+        {
+            DateTime lastWriteTimeUtc;
+            long length;
+            try
+            {
+                var info = new FileInfo(strmPath);
+                if (!info.Exists)
+                {
+                    return StrmMediaInfoService.ReadStrmTargetPath(strmPath, _logger);
+                }
+
+                lastWriteTimeUtc = info.LastWriteTimeUtc;
+                length = info.Length;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is System.Security.SecurityException)
+            {
+                return StrmMediaInfoService.ReadStrmTargetPath(strmPath, _logger);
+            }
+
+            if (_resolvedTargets.TryGetValue(strmPath, out var cached) &&
+                cached.LastWriteTimeUtc == lastWriteTimeUtc &&
+                cached.Length == length)
+            {
+                return cached.Target;
+            }
+
+            var target = StrmMediaInfoService.ReadStrmTargetPath(strmPath, _logger);
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                // 空结果既可能是空文件，也可能是共享冲突/权限/网络盘瞬态读取失败。
+                // 失败结果若按当前 mtime+length 缓存，文件恢复可读后仍会命中空缓存，因此不缓存。
+                _resolvedTargets.TryRemove(strmPath, out _);
+                return string.Empty;
+            }
+
+            if (_resolvedTargets.Count >= MaxCachedTargets)
+            {
+                _resolvedTargets.Clear();
+            }
+
+            _resolvedTargets[strmPath] = new TargetEntry(lastWriteTimeUtc, length, target);
+            return target;
         }
 
         internal static string InferContainerFromTargetPath(string targetPath)
@@ -347,7 +404,7 @@ namespace StrmTool
 
         public void Dispose()
         {
-            if (_inner is IDisposable disposable)
+            if (_ownsInner && _inner is IDisposable disposable)
             {
                 disposable.Dispose();
             }

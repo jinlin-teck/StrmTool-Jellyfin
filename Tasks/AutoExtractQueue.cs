@@ -47,21 +47,17 @@ namespace StrmTool
                 return false;
             }
 
-            // 先判重：队列满时重复事件不应误刷“队列已满”告警
-            if (_queuedItems.ContainsKey(itemId))
-            {
-                return false;
-            }
-
-            if (_queuedItems.Count >= MaxPendingItems)
-            {
-                _logger.LogWarning("Auto-extract queue is full ({Max}), skipping {Name}. It will be processed by the scheduled task.",
-                    MaxPendingItems, displayName ?? itemId.ToString());
-                return false;
-            }
-
+            // 先占位再校验上限：并发事件下最多短暂超出，最终不会把超过上限的条目留在队列中
             if (!_queuedItems.TryAdd(itemId, 0))
             {
+                return false;
+            }
+
+            if (_queuedItems.Count > MaxPendingItems)
+            {
+                _queuedItems.TryRemove(itemId, out _);
+                _logger.LogWarning("Auto-extract queue is full ({Max}), skipping {Name}. It will be processed by the scheduled task.",
+                    MaxPendingItems, displayName ?? itemId.ToString());
                 return false;
             }
 

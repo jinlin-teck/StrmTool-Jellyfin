@@ -135,8 +135,9 @@ namespace StrmTool
                     return;
                 }
 
-                if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) ||
-                    !StrmMediaInfoService.NeedsRestore(item, cacheData, _libraryManager))
+                var cacheData = await _mediaCache.GetFullCacheAsync(item.Path, cancellationToken: _disposeCts.Token)
+                    .ConfigureAwait(false);
+                if (cacheData == null || !StrmMediaInfoService.NeedsRestore(item, cacheData, _libraryManager))
                 {
                     return;
                 }
@@ -186,8 +187,9 @@ namespace StrmTool
                     return;
                 }
 
-                if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) ||
-                    !StrmMediaInfoService.NeedsRestore(item, cacheData, _libraryManager))
+                var cacheData = await _mediaCache.GetFullCacheAsync(item.Path, cancellationToken: cts.Token)
+                    .ConfigureAwait(false);
+                if (cacheData == null || !StrmMediaInfoService.NeedsRestore(item, cacheData, _libraryManager))
                 {
                     return;
                 }
@@ -195,18 +197,12 @@ namespace StrmTool
                 cts.Token.ThrowIfCancellationRequested();
                 _logger.LogInformation("Restoring metadata for {Name}", fileName);
 
-                // 恢复元数据（只保留前端显示和 Jellyfin 内部需要的字段）
-                // 注意：Jellyfin 不会重置媒体流信息，因此不需要恢复 MediaStreams
-                if (StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData, _libraryManager))
+                // Jellyfin 不会重置媒体流信息，因此这里只恢复元数据字段
+                if (await StrmMediaInfoService.RestoreMetadataFromCacheAsync(
+                        item, cacheData, _libraryManager, cts.Token, _logger).ConfigureAwait(false))
                 {
-                    // 持久化修改
-                    await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cts.Token).ConfigureAwait(false);
-
                     _logger.LogInformation("Successfully restored metadata for {Name}", fileName);
                 }
-
-                await StrmMediaInfoService.SyncAudioRelationshipsStaticAsync(
-                    item, _libraryManager, cts.Token, _logger).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {

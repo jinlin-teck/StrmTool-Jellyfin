@@ -614,7 +614,7 @@
                 <div class="strmtool-header-title-wrap">
                     <div class="strmtool-title-row">
                         <h2 class="strmtool-header-title" id="pageTitle">Strm Tool Settings</h2>
-                        <span class="strmtool-version-pill">v2.6.1</span>
+                        <span class="strmtool-version-pill">v2.6.2</span>
                     </div>
                     <p class="strmtool-header-desc" id="pageSubtitle">
                         Extract audio, video codec, resolution, and subtitle streams from strm files to enhance media library display and instant playback performance
@@ -903,6 +903,7 @@
         };
 
         // 作用域选择器
+        const pluginId = '6107fc8c-883a-4171-b70e-7590658706B9';
         const pageRoot = document.querySelector('#configPage');
         const getElement = (id) => id === 'configPage' ? pageRoot : pageRoot.querySelector('#' + id);
         let configLoaded = false;
@@ -1042,7 +1043,7 @@
                 return;
             }
 
-            ApiClient.getPluginConfiguration('6107fc8c-883a-4171-b70e-7590658706B9').then(function(config) {
+            ApiClient.getPluginConfiguration(pluginId).then(function(config) {
                 if (requestId !== loadRequestId || revision !== editRevision || saving) return;
                 if (!config) throw new Error('Empty plugin configuration');
                 const chkAuto = getElement('chkEnableAutoExtract');
@@ -1151,7 +1152,7 @@
             }
 
             if (typeof ApiClient !== 'undefined' && ApiClient.updatePluginConfiguration) {
-                ApiClient.updatePluginConfiguration('6107fc8c-883a-4171-b70e-7590658706B9', config).then(function() {
+                ApiClient.updatePluginConfiguration(pluginId, config).then(function() {
                     configDirty = editRevision !== savedRevision;
                     if (btnSave && btnSaveText) {
                         btnSave.classList.remove('loading');

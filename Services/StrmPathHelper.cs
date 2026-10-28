@@ -49,6 +49,16 @@ namespace StrmTool
                 return MediaProtocol.Rtsp;
             }
 
+            if (path.StartsWith("udp://", StringComparison.OrdinalIgnoreCase))
+            {
+                return MediaProtocol.Udp;
+            }
+
+            if (path.StartsWith("rtp://", StringComparison.OrdinalIgnoreCase))
+            {
+                return MediaProtocol.Rtp;
+            }
+
             if (path.StartsWith("ftp://", StringComparison.OrdinalIgnoreCase))
             {
                 return MediaProtocol.Ftp;

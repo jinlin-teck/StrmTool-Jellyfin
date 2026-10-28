@@ -52,6 +52,29 @@ class MigrationTests(unittest.TestCase):
             stream = M["convert_single_stream"]({"Type": "Subtitle", "DeliveryMethod": raw}, True)
             self.assertNotIn("DeliveryMethod", stream)
 
+    def test_remote_external_subtitle_and_nonpositive_runtime(self):
+        stream = M["convert_single_stream"]({
+            "Type": "Subtitle", "Codec": "srt", "IsExternal": True,
+            "Path": "https://example.com/sub/a.srt",
+        }, True)
+        self.assertEqual("https://example.com/sub/a.srt", stream["Path"])
+        self.assertTrue(stream["IsExternalUrl"])
+
+        self.assertIsNone(M["convert_single_stream"]({
+            "Type": "Subtitle", "Codec": "srt", "IsExternal": True,
+            "Path": "/abs/outside/a.srt",
+        }, True))
+
+        payload, reason = M["build_jellyfin_cache_payload"](
+            [{"MediaSourceInfo": {
+                "MediaStreams": [{"Type": "Video", "Codec": "h264", "Index": 0}],
+                "RunTimeTicks": 0,
+            }}],
+            strm_hash="H",
+        )
+        self.assertIsNone(reason)
+        self.assertNotIn("runTimeTicks", payload)
+
     def test_emby_numeric_stream_types(self):
         expected = {1: 0, 2: 1, 3: 2, 4: 3, 6: 4}
         for emby_type, jellyfin_type in expected.items():

@@ -24,20 +24,16 @@ namespace StrmTool
         protected readonly SemaphoreSlim _semaphore;
 
         private readonly ILibraryManager _libraryManager;
-        private LibraryScanListener _scanListener;
-        private ItemUpdateListener _updateListener;
-        private readonly AutoExtractQueue _autoExtractQueue;
-        private readonly object _eventLock = new object();
+        private readonly AutoExtractRuntime _autoExtractRuntime;
 
         public ExtractTask(
             ILibraryManager libraryManager,
             IMediaEncoder mediaEncoder,
             IMediaStreamRepository mediaStreamRepository,
-            IItemRepository itemRepository,
             ILogger<ExtractTask> logger)
         {
             _logger = logger;
-            _mediaInfoService = new StrmMediaInfoService(libraryManager, mediaEncoder, mediaStreamRepository, itemRepository, logger);
+            _mediaInfoService = new StrmMediaInfoService(libraryManager, mediaEncoder, mediaStreamRepository, logger);
             _mediaCache = new MediaInfoCache(logger);
 
             if (Plugin.Instance == null)
@@ -50,27 +46,12 @@ namespace StrmTool
             _semaphore = new SemaphoreSlim(_config.MaxConcurrentExtract);
 
             _libraryManager = libraryManager;
-            try
-            {
-                _scanListener = new LibraryScanListener(_libraryManager, _logger, _config);
-                _scanListener.StrmFileDetected += OnStrmFileDetected;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to initialize library scan listener");
-            }
-
-            try
-            {
-                _updateListener = new ItemUpdateListener(_libraryManager, _logger, _config, _mediaCache);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to initialize item update listener");
-            }
-
-            // 自动提取队列：事件线程仅入队，worker 数量固定为 MaxConcurrentExtract（修改需重启生效）
-            _autoExtractQueue = new AutoExtractQueue(_config.MaxConcurrentExtract, HandleAutoExtractItemAsync, _logger);
+            _autoExtractRuntime = new AutoExtractRuntime(
+                _libraryManager,
+                _logger,
+                _mediaCache,
+                () => PluginConfigurationProvider.GetCurrent(_config),
+                HandleAutoExtractItemAsync);
         }
 
         public string Category => "StrmTool";
@@ -117,9 +98,9 @@ namespace StrmTool
                 return false;
             }
 
-            if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) ||
-                cacheData.MediaStreams == null ||
-                cacheData.MediaStreams.Count == 0)
+            var cacheData = await _mediaCache.GetFullCacheAsync(item.Path, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            if (cacheData?.MediaStreams == null || cacheData.MediaStreams.Count == 0)
             {
                 return false;
             }
@@ -202,25 +183,6 @@ namespace StrmTool
             return probeResult;
         }
 
-        private void OnStrmFileDetected(object sender, BaseItem item)
-        {
-            if (_disposed)
-                return;
-
-            RefreshConfig();
-
-            var fileName = Path.GetFileNameWithoutExtension(item.Path);
-
-            if (!_config.EnableAutoExtract)
-            {
-                _logger.LogDebug("Auto-extract is disabled, skipping {Name}", fileName);
-                return;
-            }
-
-            // 不在事件线程读取媒体流/缓存；强制刷新和缓存失效交由后台统一判断。
-            _autoExtractQueue.TryEnqueue(item.Id, fileName);
-        }
-
         /// <summary>
         /// 自动提取队列的单条处理：按配置延迟后执行提取（含超时保护）。
         /// </summary>
@@ -244,25 +206,6 @@ namespace StrmTool
                 }
 
                 await ExtractSingleItemAsync(item, cts.Token).ConfigureAwait(false);
-            }
-        }
-
-        public void CleanupListener()
-        {
-            lock (_eventLock)
-            {
-                if (_scanListener != null)
-                {
-                    _scanListener.StrmFileDetected -= OnStrmFileDetected;
-                    _scanListener.Dispose();
-                    _scanListener = null;
-                }
-
-                if (_updateListener != null)
-                {
-                    _updateListener.Dispose();
-                    _updateListener = null;
-                }
             }
         }
 
@@ -371,19 +314,18 @@ namespace StrmTool
                 return;
             }
 
-            if (!_mediaCache.TryGetFullCache(item.Path, out var cacheData) ||
-                !StrmMediaInfoService.NeedsRestore(item, cacheData, _libraryManager))
+            var cacheData = await _mediaCache.GetFullCacheAsync(item.Path, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            if (cacheData == null || !StrmMediaInfoService.NeedsRestore(item, cacheData, _libraryManager))
             {
                 return;
             }
 
-            if (StrmMediaInfoService.TryRestoreMetadataFromCache(item, cacheData, _libraryManager))
+            if (await StrmMediaInfoService.RestoreMetadataFromCacheAsync(
+                    item, cacheData, _libraryManager, cancellationToken, _logger).ConfigureAwait(false))
             {
-                await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataImport, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("{Prefix} - Restored metadata for {Name} (Size={Size})", logPrefix, item.Name, cacheData.Size);
             }
-
-            await _mediaInfoService.SyncAudioRelationshipsAsync(item, cancellationToken).ConfigureAwait(false);
         }
 
         private async Task<bool> ProcessSingleItemAsync(BaseItem item, CancellationToken cancellationToken)
@@ -486,18 +428,7 @@ namespace StrmTool
 
             if (disposing)
             {
-                // 监听器清理（内部最长等待 30s）与队列 worker 退出并行等待，避免串行阻塞
-                var listenerCleanup = Task.Run(CleanupListener);
-                _autoExtractQueue.Dispose();
-
-                try
-                {
-                    listenerCleanup.Wait();
-                }
-                catch (AggregateException ex)
-                {
-                    _logger.LogWarning(ex, "Error cleaning up listeners");
-                }
+                _autoExtractRuntime.Dispose();
             }
         }
     }

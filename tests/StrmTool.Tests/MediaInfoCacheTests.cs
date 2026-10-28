@@ -321,6 +321,46 @@ namespace StrmTool.Tests
         }
 
         [Fact]
+        public void LegacyAbsoluteSubtitlePathsOutsideDirectoryAreDroppedOnRead()
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            string outside = Path.Combine(Path.GetTempPath(), "elsewhere", "movie.srt");
+            var data = new MediaInfoCacheData
+            {
+                Version = "1.0",
+                IsValid = true,
+                StrmContentHash = "LEGACY",
+                MediaStreams = new List<MediaStream>
+                {
+                    new() { Index = 0, Type = MediaStreamType.Video, Codec = "h264" },
+                    new() { Index = 1, Type = MediaStreamType.Subtitle, IsExternal = true, Path = outside }
+                }
+            };
+            File.WriteAllText(CachePath, JsonSerializer.Serialize(data, new JsonSerializerOptions
+            {
+                DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+            }));
+
+            Assert.True(_cache.TryGetFullCache(StrmPath, out var full, verifyContentHash: false));
+            Assert.Single(full.MediaStreams);
+            Assert.DoesNotContain(full.MediaStreams, s => s.Type == MediaStreamType.Subtitle);
+        }
+
+        [Fact]
+        public async Task AsyncReadAppliesSameValidationAsSyncRead()
+        {
+            File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");
+            Assert.True(await _cache.SaveFullCacheAsync(StrmPath, Streams("h264"), CacheMeta(100, 1000, "mkv")));
+
+            var cache = await _cache.GetFullCacheAsync(StrmPath, verifyContentHash: true);
+            Assert.NotNull(cache);
+            Assert.Equal(100, cache.Size);
+
+            File.WriteAllText(StrmPath, "https://example.invalid/media-b.mkv");
+            Assert.Null(await _cache.GetFullCacheAsync(StrmPath, verifyContentHash: true));
+        }
+
+        [Fact]
         public async Task WriteFailureReturnsFalseWithoutLeavingTemporaryFiles()
         {
             File.WriteAllText(StrmPath, "https://example.invalid/media-a.mkv");

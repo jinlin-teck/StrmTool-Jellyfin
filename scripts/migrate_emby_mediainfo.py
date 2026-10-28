@@ -61,13 +61,13 @@ EMBY_STREAM_TYPE_MAP: dict[int, int] = {
 DELIVERY_METHOD_MAP = {"Encode": 0, "Embed": 1, "External": 2, "Hls": 3, "Drop": 4}
 
 # Emby 的 ExtendedVideoSubType -> Jellyfin 杜比视界字段。
-# 值：(DvProfile, DvBlSignalCompatibilityId, VideoRangeType, VideoDoViTitle)
-DOVI_PROFILE_TABLE: dict[str, tuple[int, int, int, str]] = {
-    "DoviProfile50": (5, 0, 4, "Dolby Vision Profile 5"),
-    "DoviProfile76": (7, 6, 8, "Dolby Vision Profile 7.6 (HDR10)"),
-    "DoviProfile81": (8, 1, 5, "Dolby Vision Profile 8.1 (HDR10)"),
-    "DoviProfile82": (8, 2, 7, "Dolby Vision Profile 8.2 (SDR)"),
-    "DoviProfile84": (8, 4, 6, "Dolby Vision Profile 8.4 (HLG)"),
+# 值：(DvProfile, DvBlSignalCompatibilityId, VideoDoViTitle)
+DOVI_PROFILE_TABLE: dict[str, tuple[int, int, str]] = {
+    "DoviProfile50": (5, 0, "Dolby Vision Profile 5"),
+    "DoviProfile76": (7, 6, "Dolby Vision Profile 7.6 (HDR10)"),
+    "DoviProfile81": (8, 1, "Dolby Vision Profile 8.1 (HDR10)"),
+    "DoviProfile82": (8, 2, "Dolby Vision Profile 8.2 (SDR)"),
+    "DoviProfile84": (8, 4, "Dolby Vision Profile 8.4 (HLG)"),
 }
 # profile 8 的兼容基础层：1=HDR10, 2=SDR, 4=HLG
 DOVI_COMPAT_RANGE_TYPES = {1: 5, 2: 7, 4: 6}
@@ -102,11 +102,12 @@ def apply_dovi_mapping(stream: dict[str, Any], ext_sub: Any) -> bool:
 
     mapped = DOVI_PROFILE_TABLE.get(ext_sub)
     if mapped:
-        _, compat_id, range_type, title = mapped
+        _, compat_id, title = mapped
     else:
         compat_id = 6 if profile == 7 else (version if profile == 8 and version in DOVI_COMPAT_RANGE_TYPES else 0)
-        range_type = 8 if profile == 7 else (DOVI_COMPAT_RANGE_TYPES.get(version, 4) if profile == 8 else 4)
         title = f"Dolby Vision Profile {profile}.{version}"
+
+    range_type = 8 if profile == 7 else (DOVI_COMPAT_RANGE_TYPES.get(version, 4) if profile == 8 else 4)
 
     if profile in (5, 7, 8, 9):
         stream["DvProfile"] = profile
@@ -235,6 +236,10 @@ def compute_strm_content_hash(strm_path: str) -> str | None:
         return None
 
 
+def is_remote_url(path_val: Any) -> bool:
+    return isinstance(path_val, str) and path_val.lower().startswith(("http://", "https://"))
+
+
 def is_safe_local_filename(path_val: str) -> bool:
     if not path_val or "\0" in path_val:
         return False
@@ -258,9 +263,13 @@ def convert_single_stream(raw: dict[str, Any], has_video: bool) -> dict[str, Any
             return None
 
     is_external = bool(raw.get("IsExternal", False))
+    external_url = False
     if is_external and stream_type == 2:
         sub_path = raw.get("Path")
-        if not isinstance(sub_path, str) or not is_safe_local_filename(sub_path):
+        if not isinstance(sub_path, str) or not sub_path:
+            return None
+        external_url = is_remote_url(sub_path)
+        if not external_url and not is_safe_local_filename(sub_path):
             return None
 
     s: dict[str, Any] = dict(raw)
@@ -278,6 +287,8 @@ def convert_single_stream(raw: dict[str, Any], has_video: bool) -> dict[str, Any
     s["IsHearingImpaired"] = bool(s.get("IsHearingImpaired", False))
     s["IsOriginal"] = bool(s.get("IsOriginal", False))
     s["IsExternal"] = is_external
+    if external_url:
+        s["IsExternalUrl"] = True
     s["IsTextSubtitleStream"] = bool(s.get("IsTextSubtitleStream", False))
     # 内封流 SupportsExternalStream 在 Jellyfin 缓存中为 false，外挂文本字幕保持 true
     s["SupportsExternalStream"] = bool(s.get("SupportsExternalStream", False)) if is_external else False
@@ -477,7 +488,9 @@ def build_jellyfin_cache_payload(
         "size": size,
     }
     if runtime_ticks is not None:
-        payload["runTimeTicks"] = safe_int(runtime_ticks, 0)
+        parsed_ticks = safe_int(runtime_ticks, 0)
+        if parsed_ticks > 0:
+            payload["runTimeTicks"] = parsed_ticks
     if container:
         payload["container"] = str(container)
     payload["width"] = width
@@ -640,7 +653,7 @@ def main() -> int:
         "--workers",
         type=int,
         default=8,
-        help="并发工作线程数（默认: 8）",
+        help="并发工作线程数（默认: 8，上限: 64）",
     )
 
     args = parser.parse_args()
@@ -672,7 +685,8 @@ def main() -> int:
     }
     errors: list[ConvertResult] = []
 
-    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+    worker_count = min(64, max(1, args.workers))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(
                 process_mediainfo_file,

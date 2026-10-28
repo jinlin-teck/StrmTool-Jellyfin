@@ -27,13 +27,14 @@ namespace StrmTool
             }
 
             serviceCollection.Remove(existingDescriptor);
+            bool ownsInner = existingDescriptor.ImplementationInstance == null;
             serviceCollection.Add(new ServiceDescriptor(
                 typeof(IMediaSourceManager),
                 sp =>
                 {
                     var inner = ResolveDescriptor(sp, existingDescriptor);
                     var logger = sp.GetRequiredService<ILogger<StrmMediaSourceManagerDecorator>>();
-                    return new StrmMediaSourceManagerDecorator(inner, logger);
+                    return new StrmMediaSourceManagerDecorator(inner, logger, ownsInner);
                 },
                 existingDescriptor.Lifetime));
             IsRegistered = true;

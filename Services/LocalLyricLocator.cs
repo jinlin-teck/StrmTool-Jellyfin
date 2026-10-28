@@ -82,9 +82,10 @@ namespace StrmTool
                 audio.LyricFiles = Array.Empty<string>();
                 audio.HasLyrics = hasLyricStream;
             }
-            else if (hasLyricStream)
+            else
             {
-                audio.HasLyrics = true;
+                // 无歌词流、无本地歌词且无历史记录时复位，避免 HasLyrics 残留 true
+                audio.HasLyrics = hasLyricStream;
             }
         }
 

@@ -49,6 +49,24 @@ namespace StrmTool
             public List<string> Genres { get; set; }
         }
 
+        /// <summary>
+        /// 一次恢复/判定流程内复用的父级实体，避免重复沿 ParentId 链查询。
+        /// </summary>
+        private sealed class AudioParentContext
+        {
+            public MusicAlbum Album { get; init; }
+            public MusicArtist Artist { get; init; }
+
+            public static AudioParentContext Resolve(Audio audio, ILibraryManager libraryManager, ILogger logger = null)
+            {
+                return new AudioParentContext
+                {
+                    Album = FindParent<MusicAlbum>(audio, libraryManager, logger),
+                    Artist = FindParent<MusicArtist>(audio, libraryManager, logger)
+                };
+            }
+        }
+
         public static bool HasMissingAudioMetadata(
             BaseItem item, ILibraryManager libraryManager = null, bool checkParentAlbum = true, ILogger logger = null)
         {
@@ -171,13 +189,14 @@ namespace StrmTool
                 return false;
             }
 
-            var effective = GetEffectiveCacheMetadata(audio, cacheData, libraryManager);
+            var parents = AudioParentContext.Resolve(audio, libraryManager);
+            var effective = GetEffectiveCacheMetadata(audio, cacheData, libraryManager, parents);
             if (NeedsAudioItemRestore(audio, effective))
             {
                 return true;
             }
 
-            return NeedsParentAlbumSync(audio, effective, libraryManager);
+            return libraryManager != null && NeedsParentAlbumSync(audio, effective, parents.Album);
         }
 
         public static bool TryRestoreAudioMetadataFromCache(
@@ -188,7 +207,8 @@ namespace StrmTool
                 return false;
             }
 
-            var effective = GetEffectiveCacheMetadata(audio, cacheData, libraryManager);
+            var parents = AudioParentContext.Resolve(audio, libraryManager);
+            var effective = GetEffectiveCacheMetadata(audio, cacheData, libraryManager, parents);
             return ApplyEffectiveAudioMetadata(audio, effective);
         }
 
@@ -198,9 +218,13 @@ namespace StrmTool
         /// 始终回退使用标准目录结构（专辑艺术家/专辑/歌曲）或父级实体补齐，保持与探测路径一致。
         /// </summary>
         private static AudioFallbackMetadata GetEffectiveCacheMetadata(
-            Audio audio, MediaInfoCacheData cacheData, ILibraryManager libraryManager, ILogger logger = null)
+            Audio audio,
+            MediaInfoCacheData cacheData,
+            ILibraryManager libraryManager,
+            AudioParentContext parents = null,
+            ILogger logger = null)
         {
-            var fallback = ResolveFallbackMetadata(audio, libraryManager, logger);
+            var fallback = ResolveFallbackMetadata(audio, libraryManager, logger, parents);
 
             var album = NormalizeString(cacheData.Album) ?? fallback.Album;
             var cachedArtists = NormalizeList(cacheData.Artists);
@@ -381,15 +405,9 @@ namespace StrmTool
         }
 
         private static bool NeedsParentAlbumSync(
-            Audio audio, AudioFallbackMetadata effective, ILibraryManager libraryManager)
+            Audio audio, AudioFallbackMetadata effective, MusicAlbum album)
         {
-            if (audio == null || libraryManager == null)
-            {
-                return false;
-            }
-
-            var album = FindParent<MusicAlbum>(audio, libraryManager);
-            if (album == null || album.IsLocked)
+            if (audio == null || album == null || album.IsLocked)
             {
                 return false;
             }
@@ -576,29 +594,35 @@ namespace StrmTool
 
             // UpdatePeople 为全量替换语义：先读取并保留已有人员（如 Composer、Lyricist、Performer 等），
             // 且仅在确实缺少目标 Artist/AlbumArtist 时才调用 UpdatePeople。
-            IReadOnlyList<PersonInfo> existing = null;
+            // 读不到既有人员时直接跳过，避免用仅含 Artist 的集合抹掉其他角色。
+            IReadOnlyList<PersonInfo> existing;
             try
             {
                 existing = libraryManager.GetPeople(item);
             }
             catch (Exception ex) when (ex is NotSupportedException || ex is NotImplementedException || ex is NullReferenceException)
             {
-                logger?.LogDebug(ex, "GetPeople not available for {Name}; proceeding with incoming people", item.Name);
+                logger?.LogDebug(ex, "GetPeople not available for {Name}; skipping people update", item.Name);
+                return false;
             }
             catch (Exception ex)
             {
-                logger?.LogDebug(ex, "Failed to read existing people for {Name}", item.Name);
+                logger?.LogWarning(ex, "Failed to read existing people for {Name}; skipping people update", item.Name);
+                return false;
+            }
+
+            if (existing == null)
+            {
+                logger?.LogDebug("Existing people unavailable for {Name}; skipping people update", item.Name);
+                return false;
             }
 
             var merged = new List<PersonInfo>();
-            if (existing != null)
+            foreach (var person in existing)
             {
-                foreach (var person in existing)
+                if (person != null && !string.IsNullOrWhiteSpace(person.Name))
                 {
-                    if (person != null && !string.IsNullOrWhiteSpace(person.Name))
-                    {
-                        PeopleHelper.AddPerson(merged, person);
-                    }
+                    PeopleHelper.AddPerson(merged, person);
                 }
             }
 
@@ -608,7 +632,7 @@ namespace StrmTool
                 PeopleHelper.AddPerson(merged, person);
             }
 
-            if (existing != null && merged.Count == beforeCount)
+            if (merged.Count == beforeCount)
             {
                 return false;
             }
@@ -665,7 +689,10 @@ namespace StrmTool
         }
 
         private static AudioFallbackMetadata ResolveFallbackMetadata(
-            Audio audio, ILibraryManager libraryManager, ILogger logger = null)
+            Audio audio,
+            ILibraryManager libraryManager,
+            ILogger logger = null,
+            AudioParentContext parents = null)
         {
             var result = new AudioFallbackMetadata();
             if (audio == null)
@@ -685,8 +712,9 @@ namespace StrmTool
             result.Artists = parsedArtists;
 
             // 2. 优先从 Jellyfin 库实体层级（MusicArtist / MusicAlbum）获取标准专辑与专辑艺术家
-            var parentAlbum = FindParent<MusicAlbum>(audio, libraryManager, logger);
-            var parentArtist = FindParent<MusicArtist>(audio, libraryManager, logger);
+            parents ??= AudioParentContext.Resolve(audio, libraryManager, logger);
+            var parentAlbum = parents.Album;
+            var parentArtist = parents.Artist;
 
             if (parentAlbum != null && !string.IsNullOrWhiteSpace(parentAlbum.Name))
             {

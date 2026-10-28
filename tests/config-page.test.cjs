@@ -64,3 +64,29 @@ test('failed save retains edits and permits retry', async () => {
     assert.equal(s.elements.btnSave.disabled, false); s.listeners.visibilitychange(); assert.equal(s.requests.length, 1);
     s.context.saveConfig(); assert.equal(s.updates[1].config.RefreshDelayMs, 3500);
 });
+test('page translations stay in sync with embedded resources', () => {
+    const s = setup();
+    const pageTranslations = vm.runInContext('translations', s.context);
+    const resources = {
+        en: JSON.parse(fs.readFileSync(path.join(__dirname, '../Resources/en.json'), 'utf8')),
+        zh: JSON.parse(fs.readFileSync(path.join(__dirname, '../Resources/zh-CN.json'), 'utf8'))
+    };
+    for (const [lang, resource] of Object.entries(resources)) {
+        for (const [key, value] of Object.entries(pageTranslations[lang])) {
+            assert.ok(key in resource, `${lang}: resource is missing ${key}`);
+            assert.equal(resource[key], value, `${lang}: resource text differs for ${key}`);
+        }
+    }
+});
+test('version badge and plugin id match backend sources', () => {
+    const csproj = fs.readFileSync(path.join(__dirname, '../StrmTool.csproj'), 'utf8');
+    const version = csproj.match(/<AssemblyVersion>([^<]+)<\/AssemblyVersion>/)[1];
+    const badge = html.match(/strmtool-version-pill">v([^<]+)</)[1];
+    assert.equal(badge, version);
+
+    const pluginSource = fs.readFileSync(path.join(__dirname, '../Plugin.cs'), 'utf8');
+    const guid = pluginSource.match(/new Guid\("([0-9a-fA-F-]+)"\)/)[1].toLowerCase();
+    const pageId = script.match(/const pluginId = '([0-9a-fA-F-]+)'/)[1].toLowerCase();
+    assert.equal(pageId, guid);
+    assert.doesNotMatch(script.replace(/const pluginId = '[^']+';/, ''), /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/);
+});

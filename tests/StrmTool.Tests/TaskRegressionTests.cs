@@ -52,7 +52,7 @@ namespace StrmTool.Tests
         public void LibraryQueryChecksCancellationBeforeCallingManager()
         {
             // null manager would fail if accessed; cancellation must precede the query.
-            var service = new StrmMediaInfoService(null, null, null, null, NullLogger.Instance);
+            var service = new StrmMediaInfoService(null, null, null, NullLogger.Instance);
             using var cts = new CancellationTokenSource();
             cts.Cancel();
             Assert.ThrowsAny<OperationCanceledException>(() => service.GetAllStrmItems(cts.Token));
@@ -93,10 +93,11 @@ namespace StrmTool.Tests
             using var task = new ExtractHarness(library, forceRefresh);
             var item = new LibraryVideo { Id = Guid.NewGuid(), Path = Path.Combine(Path.GetTempPath(), "movie.strm") };
             var type = typeof(ExtractTask);
-            type.GetMethod("OnStrmFileDetected", BindingFlags.Instance | BindingFlags.NonPublic)
-                .Invoke(task, new object[] { null, item });
+            var runtime = type.GetField("_autoExtractRuntime", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(task);
+            runtime.GetType().GetMethod("OnStrmFileDetected", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(runtime, new object[] { null, item });
 
-            var queue = type.GetField("_autoExtractQueue", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(task);
+            var queue = runtime.GetType().GetField("_queue", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(runtime);
             var isQueued = (bool)queue.GetType()
                 .GetMethod("IsQueued", BindingFlags.Instance | BindingFlags.NonPublic)
                 .Invoke(queue, new object[] { item.Id });
@@ -144,7 +145,7 @@ namespace StrmTool.Tests
                 File.WriteAllText(item.Path, "https://example.invalid/a.mkv");
                 Directory.CreateDirectory(Path.Combine(directory, "movie.strmtool.json"));
                 var task = CreateExportTask(item);
-                var service = new StrmMediaInfoService(null, null, null, null, NullLogger.Instance);
+                var service = new StrmMediaInfoService(null, null, null, NullLogger.Instance);
                 var method = typeof(ExportStrmInfoTask).GetMethod("ExportSingleItemAsync", BindingFlags.Instance | BindingFlags.NonPublic);
                 bool saved = await (Task<bool>)method.Invoke(task, new object[]
                 {
@@ -175,7 +176,6 @@ namespace StrmTool.Tests
             return new ExportStrmInfoTask(library,
                 DispatchProxy.Create<IMediaEncoder, NoOpLibraryProxy>(),
                 DispatchProxy.Create<IMediaStreamRepository, NoOpLibraryProxy>(),
-                DispatchProxy.Create<IItemRepository, NoOpLibraryProxy>(),
                 NullLogger<ExportStrmInfoTask>.Instance);
         }
 
@@ -192,7 +192,7 @@ namespace StrmTool.Tests
         private sealed class ExtractHarness : ExtractTask
         {
             public ExtractHarness(ILibraryManager library, bool forceRefresh)
-                : base(library, null, null, null, NullLogger<ExtractTask>.Instance)
+                : base(library, null, null, NullLogger<ExtractTask>.Instance)
             {
                 _config = new PluginConfiguration
                 {
