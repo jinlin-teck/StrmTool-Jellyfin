@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/jinlin-teck/StrmTool-Jellyfin/main/thumb.png",
     "versions": [
       {
+        "version": "2.6.2.0",
+        "changelog": "Release v2.6.2",
+        "targetAbi": "12.1.0.0",
+        "sourceUrl": "https://github.com/jinlin-teck/StrmTool-Jellyfin/releases/download/v2.6.2/StrmTool_2.6.2.0.zip",
+        "checksum": "f4326cc6e04884acf7f57a722a5632a4",
+        "timestamp": "2026-11-15T12:56:53Z"
+      },
+      {
         "version": "2.6.1.0",
         "changelog": "Release v2.6.1",
         "targetAbi": "12.1.0.0",
