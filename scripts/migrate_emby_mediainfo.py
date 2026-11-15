@@ -13,9 +13,11 @@
    - 自动补齐 HDR10 / HLG / HDR10+ 的 `ColorTransfer`（HDR10+ 另写 `Hdr10PlusPresentFlag`）；
    - 自动补齐 Dolby Atmos / DTS:X 音轨的 `Profile`；
    - 剔除 Emby 专有冗余字段，原子写入目标文件。
-4. 默认跳过纯音频文件（可通过 `--include-audio` 开启）与已存在的 `.strmtool.json`（可通过 `--overwrite` 覆盖）。
-   `--include-audio` 仅迁移技术流与歌词路径，不迁移 `AudioMetadata` 标签。
-5. 支持 `--dry-run` 预览与 `--output-dir` 隔离输出（用于无污染测试）。
+4. 默认同时转换影视与纯音频文件；纯音频会迁移 Emby `AudioMetadata` 中
+   Jellyfin 插件缓存支持的核心音乐标签字段（`--skip-audio` 可显式排除纯音频）。
+   保留 `--include-audio` 作为兼容参数（与 `--skip-audio` 互斥）。
+5. 默认跳过已存在的 `.strmtool.json`（可通过 `--overwrite` 覆盖）。
+6. 支持 `--dry-run` 预览与 `--output-dir` 隔离输出（用于无污染测试）。
 """
 
 from __future__ import annotations
@@ -27,10 +29,12 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import sys
 import uuid
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 EMBY_SUFFIX = "-mediainfo.json"
@@ -71,6 +75,157 @@ DOVI_PROFILE_TABLE: dict[str, tuple[int, int, str]] = {
 }
 # profile 8 的兼容基础层：1=HDR10, 2=SDR, 4=HLG
 DOVI_COMPAT_RANGE_TYPES = {1: 5, 2: 7, 4: 6}
+
+# 提示分类：只用于汇总展示，不影响转换成功与否或退出码。
+NOTICE_AUDIO_TAGS_UNPROBED = "audio_tags_unprobed"
+NOTICE_AUDIO_TAGS_IGNORED = "audio_tags_ignored"
+
+INT32_MAX = 2_147_483_647
+MAX_NOTICE_SAMPLES = 5
+
+
+def _normalize_audio_text(value: Any) -> str | None:
+    """仅接受字符串，去首尾空白后为空视为无效。"""
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _normalize_audio_string_list(value: Any) -> tuple[list[str] | None, bool]:
+    """
+    接受字符串数组：逐项去空白、去空项、按大小写无关规则去重且保持顺序。
+    不按 / ; 等分隔符二次拆分名称。返回 (有效列表, 是否含被忽略的非字符串项)。
+    """
+    if not isinstance(value, list):
+        return None, True
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    ignored = False
+    for item in value:
+        if not isinstance(item, str):
+            ignored = True
+            continue
+        trimmed = item.strip()
+        if not trimmed:
+            continue
+        key = trimmed.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(trimmed)
+
+    return (normalized or None), ignored
+
+
+def _normalize_positive_int(value: Any, max_value: int = INT32_MAX) -> int | None:
+    """
+    严格解析正整数：不接受布尔值、浮点数（不截断小数）或带小数/符号的字符串。
+    字符串允许首尾空白，但只接受纯 ASCII 数字。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 < value <= max_value else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not re.fullmatch(r"[0-9]+", text):
+            return None
+        # 先去掉前导零，避免超长数字触发 Python 的 int 字符串位数限制；
+        # 去零后仍超出目标范围时直接判定无效，不做无意义的大整数转换。
+        significant = text.lstrip("0")
+        if not significant or len(significant) > len(str(max_value)):
+            return None
+        parsed = int(significant)
+        return parsed if parsed <= max_value else None
+    return None
+
+
+def build_audio_tag_fields(
+    audio_metadata: Any, notices: list[tuple[str, str]] | None = None
+) -> dict[str, Any]:
+    """
+    将 Emby `AudioMetadata` 转换为 Jellyfin 缓存可消费的音乐标签字段。
+
+    仅迁移插件现有缓存格式支持的字段；`AudioTagsProbed` 严格保留源布尔语义，
+    缺失、null 或类型错误时不写入，绝不因标签存在而推断为已探测。
+    非对象元数据或个别非法字段会写入 notices，但不影响其余字段与技术流转换。
+    """
+    if not isinstance(audio_metadata, dict):
+        if notices is not None:
+            if audio_metadata is None:
+                notices.append((NOTICE_AUDIO_TAGS_UNPROBED, "缺少 AudioMetadata"))
+            else:
+                notices.append(
+                    (NOTICE_AUDIO_TAGS_IGNORED, "AudioMetadata 不是对象，已忽略音乐标签")
+                )
+                notices.append((NOTICE_AUDIO_TAGS_UNPROBED, "AudioMetadata 类型无效"))
+        return {}
+
+    mapped: dict[str, Any] = {}
+    ignored_fields: list[str] = []
+
+    probed = audio_metadata.get("AudioTagsProbed")
+    if isinstance(probed, bool):
+        mapped["audioTagsProbed"] = probed
+    elif "AudioTagsProbed" in audio_metadata and probed is not None:
+        ignored_fields.append("AudioTagsProbed")
+
+    for source_key, target_key in (("Title", "title"), ("Album", "album")):
+        if source_key not in audio_metadata:
+            continue
+        text = _normalize_audio_text(audio_metadata[source_key])
+        if text is None:
+            ignored_fields.append(source_key)
+        else:
+            mapped[target_key] = text
+
+    for source_key, target_key in (
+        ("Artists", "artists"),
+        ("AlbumArtists", "albumArtists"),
+        ("Genres", "genres"),
+    ):
+        if source_key not in audio_metadata:
+            continue
+        values, has_invalid = _normalize_audio_string_list(audio_metadata[source_key])
+        if values is not None:
+            mapped[target_key] = values
+        if has_invalid:
+            ignored_fields.append(source_key)
+
+    for source_key, target_key, max_value in (
+        ("TrackNumber", "trackNumber", INT32_MAX),
+        ("DiscNumber", "discNumber", INT32_MAX),
+        ("ProductionYear", "productionYear", 9999),
+    ):
+        if source_key not in audio_metadata:
+            continue
+        parsed = _normalize_positive_int(audio_metadata[source_key], max_value)
+        if parsed is None:
+            ignored_fields.append(source_key)
+        else:
+            mapped[target_key] = parsed
+
+    if notices is not None:
+        if ignored_fields:
+            notices.append(
+                (
+                    NOTICE_AUDIO_TAGS_IGNORED,
+                    "已忽略无效字段: " + ", ".join(ignored_fields),
+                )
+            )
+
+        if "AudioTagsProbed" not in audio_metadata:
+            notices.append((NOTICE_AUDIO_TAGS_UNPROBED, "audioTagsProbed 缺失"))
+        elif probed is None:
+            notices.append((NOTICE_AUDIO_TAGS_UNPROBED, "audioTagsProbed 为 null"))
+        elif isinstance(probed, bool) and not probed:
+            notices.append((NOTICE_AUDIO_TAGS_UNPROBED, "audioTagsProbed 为 false"))
+        elif not isinstance(probed, bool):
+            notices.append((NOTICE_AUDIO_TAGS_UNPROBED, "audioTagsProbed 类型无效"))
+
+    return mapped
 
 
 def normalize_stream_type(raw_type: Any) -> int | None:
@@ -199,6 +354,7 @@ class ConvertResult:
     source_path: str
     target_path: str | None = None
     message: str | None = None
+    notices: list[tuple[str, str]] = field(default_factory=list)
 
 
 def safe_int(val: Any, default: int = 0) -> int:
@@ -376,13 +532,14 @@ def convert_single_stream(raw: dict[str, Any], has_video: bool) -> dict[str, Any
 def build_jellyfin_cache_payload(
     emby_json_data: Any,
     strm_hash: str,
-    include_audio: bool = False,
+    include_audio: bool = True,
     strm_dir: str | None = None,
     base_name: str | None = None,
+    notices: list[tuple[str, str]] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """
     将 Emby JSON 对象转换为 Jellyfin MediaInfoCacheData 字典。
-    返回 (payload, skip_or_error_reason)。
+    返回 (payload, skip_or_error_reason)；纯音频的音乐标签提示追加到 notices。
     """
     if not isinstance(emby_json_data, list) or len(emby_json_data) == 0:
         return None, "top-level JSON is not a non-empty array"
@@ -421,7 +578,7 @@ def build_jellyfin_cache_payload(
         if conv is not None:
             converted_streams.append(conv)
 
-    # 若启用了纯音频迁移且同目录存在外挂歌词文件，补充 Type=5 (Lyric) 流
+    # 纯音频且同目录存在外挂歌词文件时，补充 Type=5 (Lyric) 流
     if not has_video and strm_dir and base_name:
         for ext in (".lrc", ".elrc", ".txt"):
             lyric_fn = base_name + ext
@@ -497,6 +654,10 @@ def build_jellyfin_cache_payload(
     payload["height"] = height
     payload["totalBitrate"] = total_bitrate
 
+    # 仅纯音频条目迁移音乐标签；电影 / MV 即使带 AudioMetadata 也不写入，避免污染影视元数据。
+    if not has_video and has_audio:
+        payload.update(build_audio_tag_fields(first.get("AudioMetadata"), notices))
+
     return payload, None
 
 
@@ -548,8 +709,8 @@ def process_mediainfo_file(
     root_dir: str,
     output_dir: str | None,
     overwrite: bool,
-    include_audio: bool,
-    dry_run: bool,
+    include_audio: bool = True,
+    dry_run: bool = False,
 ) -> ConvertResult:
     dir_name, file_name = os.path.split(source_json_path)
     if not file_name.endswith(EMBY_SUFFIX):
@@ -576,12 +737,14 @@ def process_mediainfo_file(
     if not strm_hash:
         return ConvertResult("error", source_json_path, target_json_path, ".strm file is empty or unreadable")
 
+    notices: list[tuple[str, str]] = []
     payload, reason = build_jellyfin_cache_payload(
         emby_data,
         strm_hash=strm_hash,
         include_audio=include_audio,
         strm_dir=dir_name,
         base_name=base_name,
+        notices=notices,
     )
 
     if reason == "SKIP_AUDIO":
@@ -599,7 +762,7 @@ def process_mediainfo_file(
         except Exception as ex:
             return ConvertResult("error", source_json_path, target_json_path, f"write error: {ex}")
 
-    return ConvertResult("converted", source_json_path, target_json_path)
+    return ConvertResult("converted", source_json_path, target_json_path, notices=notices)
 
 
 def collect_tasks(inputs: list[str]) -> list[tuple[str, str]]:
@@ -618,6 +781,59 @@ def collect_tasks(inputs: list[str]) -> list[tuple[str, str]]:
         else:
             print(f"[WARN] Path does not exist: {raw_input}", file=sys.stderr)
     return tasks
+
+
+def collect_notice_stats(
+    stats: dict[str, dict[str, Any]],
+    result: ConvertResult,
+    max_samples: int = MAX_NOTICE_SAMPLES,
+) -> None:
+    """按提示分类累计数量、原因与有界示例，避免大批量旧备份刷屏。"""
+    for code, detail in result.notices:
+        entry = stats.setdefault(code, {"count": 0, "reasons": Counter(), "samples": []})
+        entry["count"] += 1
+        entry["reasons"][detail] += 1
+        if len(entry["samples"]) < max_samples:
+            entry["samples"].append(f"{result.source_path}: {detail}")
+
+
+def print_audio_tag_notices(stats: dict[str, dict[str, Any]]) -> None:
+    """输出有界汇总提示；提示不等于转换失败，退出码保持不变。"""
+    unprobed = stats.get(NOTICE_AUDIO_TAGS_UNPROBED)
+    ignored = stats.get(NOTICE_AUDIO_TAGS_IGNORED)
+    if not unprobed and not ignored:
+        return
+
+    print("\n音频标签提示：", file=sys.stderr)
+    if unprobed:
+        reasons = "；".join(
+            f"{reason} × {count}" for reason, count in unprobed["reasons"].most_common()
+        )
+        print(
+            f"  - {unprobed['count']} 个纯音频条目没有可信的 audioTagsProbed: true（{reasons}）。",
+            file=sys.stderr,
+        )
+        print(
+            "    Jellyfin 是否再次探测仍取决于条目缺失的专辑/艺术家等元数据；"
+            "脚本不会伪造已探测状态。",
+            file=sys.stderr,
+        )
+    if ignored:
+        reasons = "；".join(
+            f"{reason} × {count}" for reason, count in ignored["reasons"].most_common()
+        )
+        print(
+            f"  - {ignored['count']} 个条目存在被忽略的无效音乐标签（{reasons}）。",
+            file=sys.stderr,
+        )
+    print(
+        "  以前迁移但不含音乐标签的旧缓存需先隔离预览，再用 --overwrite 显式重新生成。",
+        file=sys.stderr,
+    )
+    for entry in (unprobed, ignored):
+        if entry:
+            for sample in entry["samples"]:
+                print(f"    示例: {sample}", file=sys.stderr)
 
 
 def main() -> int:
@@ -639,10 +855,16 @@ def main() -> int:
         action="store_true",
         help="覆盖已存在的 *.strmtool.json（默认跳过已存在文件）",
     )
-    parser.add_argument(
+    audio_group = parser.add_mutually_exclusive_group()
+    audio_group.add_argument(
         "--include-audio",
         action="store_true",
-        help="同时转换纯音频文件（默认跳过；不迁移 AudioMetadata 标签，Jellyfin 侧可能仍需探测）",
+        help="兼容参数：转换纯音频（现为默认行为；与 --skip-audio 互斥）",
+    )
+    audio_group.add_argument(
+        "--skip-audio",
+        action="store_true",
+        help="跳过纯音频文件，仅转换影视条目",
     )
     parser.add_argument(
         "--dry-run",
@@ -657,12 +879,7 @@ def main() -> int:
     )
 
     args = parser.parse_args()
-    if args.include_audio:
-        print(
-            "[WARN] --include-audio 只迁移音频的技术流与歌词路径，不会迁移 AudioMetadata 标签；"
-            "Jellyfin 侧可能因缺少专辑/艺术家信息触发一次远程探测。",
-            file=sys.stderr,
-        )
+    include_audio = not args.skip_audio
     output_dir = os.path.abspath(args.output_dir) if args.output_dir else None
     try:
         tasks = prepare_tasks(collect_tasks(args.paths), output_dir)
@@ -684,6 +901,7 @@ def main() -> int:
         "error": 0,
     }
     errors: list[ConvertResult] = []
+    notice_stats: dict[str, dict[str, Any]] = {}
 
     worker_count = min(64, max(1, args.workers))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -694,7 +912,7 @@ def main() -> int:
                 root_dir,
                 output_dir,
                 args.overwrite,
-                args.include_audio,
+                include_audio,
                 args.dry_run,
             ): src_path
             for src_path, root_dir in tasks
@@ -707,6 +925,8 @@ def main() -> int:
             counts[res.status] = counts.get(res.status, 0) + 1
             if res.status == "error":
                 errors.append(res)
+            if res.notices:
+                collect_notice_stats(notice_stats, res)
             if idx % 2000 == 0 or idx == total:
                 print(
                     f"进度: {idx}/{total} | 已转换: {counts['converted']} | "
@@ -718,6 +938,8 @@ def main() -> int:
         print("\n错误详情（最多显示前 20 条）：", file=sys.stderr)
         for err in errors[:20]:
             print(f"  - {err.source_path}: {err.message}", file=sys.stderr)
+
+    print_audio_tag_notices(notice_stats)
 
     return 1 if counts["error"] > 0 else 0
 

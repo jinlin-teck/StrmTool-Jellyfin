@@ -30,9 +30,17 @@
      - 保留同目录外挂字幕文件名，并按 Jellyfin `MergeExternalStreams` 规则将外挂流 `Index` 排在内封流之后。
      - 远程 URL 外挂字幕保留完整地址并标记 `IsExternalUrl`；指向绝对路径但不在同目录的外挂字幕会被丢弃。
 
-4. **默认跳过纯音频与已有缓存**
-   - 默认仅转换包含视频流的条目（电影、剧集、动画、MV 等），跳过纯音频文件（可通过 `--include-audio` 开启）。
+4. **默认迁移影视与音乐，跳过已有缓存**
+   - 默认同时转换影视条目（电影、剧集、动画、MV 等）与纯音频文件；`--skip-audio` 可显式排除纯音频。
+   - 纯音频会迁移 Emby `AudioMetadata` 中 Jellyfin 缓存当前支持的核心音乐标签字段：
+     `AudioTagsProbed` → `audioTagsProbed`、`Title` → `title`、`Album` → `album`、
+     `Artists` → `artists`、`AlbumArtists` → `albumArtists`、`TrackNumber` → `trackNumber`、
+     `DiscNumber` → `discNumber`、`ProductionYear` → `productionYear`、`Genres` → `genres`。
+     `audioTagsProbed` 严格保留源布尔值：缺失、`null` 或类型错误时不写入，不会因为标签看起来完整而伪造 `true`。
+     艺术家 / 专辑艺术家 / 流派数组逐项去空白、去空项并去重，不按 `/`、`;` 等分隔符二次拆分名称。
+   - 电影与 MV 即使带有 `AudioMetadata` 也不会写入音乐标签。
    - 默认跳过已存在 `*.strmtool.json` 的条目，不覆盖已有缓存（可通过 `--overwrite` 强制覆盖）。
+   - 旧备份缺少 `AudioMetadata` 时仍迁移技术流与歌词路径；个别非法标签字段会被忽略并汇总提示，不影响其余字段或其他文件。
 
 ---
 
@@ -40,7 +48,7 @@
 
 ```text
 usage: migrate_emby_mediainfo.py [-h] [--output-dir OUTPUT_DIR] [--overwrite]
-                                 [--include-audio] [--dry-run]
+                                 [--include-audio | --skip-audio] [--dry-run]
                                  [--workers WORKERS]
                                  paths [paths ...]
 ```
@@ -51,8 +59,11 @@ usage: migrate_emby_mediainfo.py [-h] [--output-dir OUTPUT_DIR] [--overwrite]
 | `--dry-run` | 仅扫描、校验并输出转换统计结果，**不写入任何文件** |
 | `--output-dir DIR` | 将生成的 `*.strmtool.json` 按相对目录结构输出到指定目录，不写入源目录（用于隔离测试） |
 | `--overwrite` | 覆盖已存在的 `*.strmtool.json`（默认跳过已存在文件） |
-| `--include-audio` | 同时转换纯音频文件（默认跳过纯音频；若同目录存在 `.lrc/.elrc/.txt` 会自动附加 `Type=5` 歌词流）。**注意：不会迁移 Emby 的 `AudioMetadata` 标签，运行时会打印警告** |
+| `--skip-audio` | 跳过纯音频文件，仅转换影视条目 |
+| `--include-audio` | 兼容参数：转换纯音频（现在为默认行为，与 `--skip-audio` 互斥） |
 | `--workers N` | 并发工作线程数（默认 `8`，上限 `64`） |
+
+> 纯音频若同目录存在 `.lrc` / `.elrc` / `.txt`，会自动附加一条 `Type=5` 歌词流；缓存只保存文件名，读取时还原为当前目录绝对路径。
 
 ---
 
@@ -84,6 +95,21 @@ python3 scripts/migrate_emby_mediainfo.py \
   "/opt/appdata/emby/strm/NAS/电视剧/舌尖上的中国 (2012)  [tmdb-60781]"
 ```
 
+### 5. 仅迁移影视条目（跳过音乐）
+
+```bash
+python3 scripts/migrate_emby_mediainfo.py --skip-audio "/opt/appdata/emby/strm"
+```
+
+### 6. 显式重新生成已存在的旧缓存
+
+以前迁移过但没有音乐标签的缓存默认会被跳过。先隔离预览确认范围，再对确认的音乐目录显式覆盖：
+
+```bash
+python3 scripts/migrate_emby_mediainfo.py --dry-run --overwrite "/opt/appdata/emby/strm/NAS/音乐"
+python3 scripts/migrate_emby_mediainfo.py --overwrite "/opt/appdata/emby/strm/NAS/音乐"
+```
+
 ---
 
 ## Jellyfin 侧后续操作
@@ -91,7 +117,10 @@ python3 scripts/migrate_emby_mediainfo.py \
 1. 确保插件设置中已开启 **「启用媒体信息缓存」**（`EnableMediaInfoCache = true`）。
 2. 进入 Jellyfin **控制台 → 计划任务 → StrmTool**：
    - 执行 **「从缓存恢复 STRM 媒体信息」**（纯本地批量读取 `.strmtool.json` 写入 Jellyfin 数据库，不访问远程媒体源）；
-   - 或直接执行 **「提取 STRM 媒体信息」**（有缓存的影视条目会自动命中本地缓存跳过远程探测，未转换的纯音频条目则会正常走局域网探测并提取内嵌音乐标签）。
+   - 或直接执行 **「提取 STRM 媒体信息」**（有完整缓存的条目会命中本地缓存并跳过远程探测）。
+3. 缓存中带 `audioTagsProbed: true` 的音乐条目会直接恢复标题、专辑、艺术家、轨号、碟号、年份、流派与歌词标志；
+   未带可信已探测标记或仍缺少专辑/艺术家等元数据的条目，插件仍可能按既有策略补一次探测。迁移脚本无法保证所有音乐场景绝不探测。
+4. 目标 Jellyfin 插件版本必须支持音乐标签缓存字段（本仓库当前版本已支持）。
 
 ---
 
@@ -100,7 +129,10 @@ python3 scripts/migrate_emby_mediainfo.py \
 - **文件系统要求**：默认不覆盖模式需要目标文件系统支持硬链接；不支持时该文件会报错且不生成半成品，不会自动降级为可能覆盖已有缓存的写入方式。
 - **批次错误**：单文件读取、转换或写入失败会计入错误并继续处理其他文件；存在错误时退出码为 `1`。
 - **章节信息 (`Chapters`)**：Emby 的 `-mediainfo.json` 中包含章节时间点，而本分支 `.strmtool.json` 仅缓存媒体流与条目元数据（不缓存章节），转换时会忽略 `Chapters` 字段。
-- **纯音频标签**：新版 Emby 的 `-mediainfo.json` 会在顶层 `AudioMetadata` 中保存标签（标题、专辑、歌手、音轨号、年份、流派等），但本脚本**暂不迁移这些标签**。因此纯音频默认跳过；使用 `--include-audio` 只会迁移技术流与歌词路径，生成的缓存不含 `audioTagsProbed: true`，Jellyfin 仍可能对缺少专辑/艺术家信息的音频发起一次探测以补齐标签。
+- **非全量音乐迁移边界**：只迁移上述插件缓存格式支持的核心标签。以下内容**不会**迁移：`SortName`、`Composers`、精确 `PremiereDate`、`ProviderIds`、封面图片内容、内嵌歌词文本、章节，以及首个 `MediaSource` 之外的多媒体源。脚本也不会生成插件不消费的额外字段。
+- **艺术家名拆分差异**：脚本保存 `artists` / `albumArtists` 时不按分隔符拆分；但 Jellyfin 插件恢复阶段现有逻辑仍会按 `/`、`;` 等分隔符拆分，本次不改变。不要假设脚本保存的数组在恢复后一定原样保留。
+- **旧缓存与探测**：默认跳过已存在的 `*.strmtool.json`，不会自动升级旧缓存。以前迁移过但不含音乐标签的缓存需按示例 6 显式 `--overwrite` 重新生成。`AudioTagsProbed` 为 `false` / 缺失 / 非法时，脚本会保留技术流并给出汇总提示，但不会伪造 `true`；Jellyfin 是否再次探测仍取决于条目缺失的专辑/艺术家等元数据。
+- **目录回退**：文件名与标准目录结构（专辑艺术家/专辑/歌曲）的推断仍由插件 `Services/AudioMetadataHelper.cs` 负责，脚本不实现第二套推断逻辑。
 
 ## 回归测试
 
